@@ -1,3 +1,4 @@
+import pytz
 import os
 import time
 import datetime
@@ -170,7 +171,10 @@ def evaluate_intraday_setup(ticker: str):
 
 def run_intraday_scan():
     print("Running 0DTE Intraday Scan via Polygon.io...")
-    messages = [f"⚡ **0DTE Intraday Scanner** ({datetime.datetime.now().strftime('%H:%M ET')})\n"]
+    
+    # Fix the UTC time bug so it prints actual Eastern Time
+    now_et = datetime.datetime.now(pytz.timezone('US/Eastern')).strftime('%H:%M ET')
+    messages = [f"⚡ **0DTE Intraday Scanner** ({now_et})\n"]
     triggers = 0
 
     for ticker in TICKERS:
@@ -180,12 +184,14 @@ def run_intraday_scan():
             triggers += 1
         time.sleep(1)  # Buffer between API requests
 
-    if triggers > 0:
-        final_message = "\n\n".join(messages)
-        print(final_message)
-        send_telegram(final_message)
-    else:
-        print("No active 0DTE breakout signals found. Remaining silent.")
+    # Remove the silent gate and append a heartbeat message if no trades triggered
+    if triggers == 0:
+        messages.append("⚪ No active 0DTE breakout signals right now.")
+
+    final_message = "\n\n".join(messages)
+    print(final_message)
+    send_telegram(final_message)
+
 
 if __name__ == "__main__":
     run_intraday_scan()
