@@ -3,13 +3,13 @@ name: Intraday 0DTE Spread Scanner
 on:
   schedule:
     # 9:30 AM ET -> 1:30 PM UTC
-    - cron: '30 13 * * 1-5'
+    - cron: '37 13 * * 1-5'
 
     # 10:00 AM to 3:59 PM ET (Every 30 mins) -> 2:00 PM to 7:59 PM UTC
-    - cron: '0,30 14-19 * * 1-5'
+    - cron: '7,37 14-19 * * 1-5'
 
     # 4:00 PM ET -> 8:00 PM UTC
-    - cron: '0 20 * * 1-5'
+    - cron: '7 20 * * 1-5'
   workflow_dispatch: 
 
 
