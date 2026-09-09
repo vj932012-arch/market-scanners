@@ -8,8 +8,8 @@
   "swing": {
     "tickers": ["SPY", "QQQ", "NVDA", "GOOGL", "AAPL", "AMZN"]
   },
-  "chop": {
-    "tickers": ["SPY", "QQQ"],
-    "adx_ceiling": 20.0
+  "squeeze": {
+    "tickers": ["SPY", "QQQ", "GOOGL", "NVDA", "AMZN"],
+    "adx_threshold": 25.0
   }
 }
