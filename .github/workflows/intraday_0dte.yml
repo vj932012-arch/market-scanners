@@ -2,10 +2,19 @@ name: Intraday 0DTE Spread Scanner
 
 on:
   schedule:
-    # Runs at minute 0 and 30 past every hour from 14:00 to 20:00 UTC (10:00 AM - 4:00 PM EDT)
-    # Monday through Friday (1-5)
-    - cron: '*/30 14-20 * * 1-5'
+    # 9:30 AM (Market Open)
+    - cron: '30 9 * * 1-5'
+      timezone: 'America/New_York'
+      
+    # 10:00 AM to 3:30 PM (Every 30 mins)
+    - cron: '*/30 10-15 * * 1-5'
+      timezone: 'America/New_York'
+      
+    # 4:00 PM (Market Close)
+    - cron: '0 16 * * 1-5'
+      timezone: 'America/New_York'
   workflow_dispatch: # Allows manual triggering from GitHub Actions UI
+
 
 jobs:
   scan-intraday:
