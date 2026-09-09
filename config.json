@@ -1,7 +1,7 @@
 {
   "intraday_0dte": {
     "tickers": ["SPY", "QQQ"],
-    "spread_width": 2.0,
+    "spread_width": 1.0,
     "rvol_threshold": 1.30,
     "adx_threshold": 25.0
   },
