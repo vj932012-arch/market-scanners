@@ -169,6 +169,12 @@ def run_intraday_scan():
             triggers += 1
         time.sleep(1)  # Buffer between API requests
 
+    if triggers > 0:
+        final_message = "\n\n".join(messages)
+        print(final_message)
+        send_telegram(final_message)
+    else:
+        print("No active 0DTE breakout signals found. Remaining silent.")
 
 if __name__ == "__main__":
     run_intraday_scan()
