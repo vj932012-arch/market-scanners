@@ -1,0 +1,8 @@
+streamlit
+yfinance
+pandas
+numpy
+plotly
+pytz
+tzdata
+pandas-ta
