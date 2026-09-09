@@ -2,9 +2,10 @@ name: Hourly TTM Squeeze Scanner
 
 on:
   schedule:
-    # Runs at minute 0 past every hour from 14:00 to 20:00 UTC (10 AM - 4 PM EDT)
+    # Runs at minute 0 past every hour from 10:00 AM to 4:00 PM Eastern Time
     # Mon-Fri (1-5)
-    - cron: '0 14-20 * * 1-5'
+    - cron: '0 10-16 * * 1-5'
+      timezone: 'America/New_York'
   workflow_dispatch: # Allows you to manually trigger a scan anytime
 
 jobs:
