@@ -1,13 +1,14 @@
 import os
+import time
 import datetime
 import pandas as pd
-import yfinance as yf
 import pandas_ta as ta
 import requests
 
 # --- SECRETS LOADED FROM GITHUB ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
 TICKERS = ["SPY", "QQQ", "GOOGL", "NVDA", "AMZN"] # Your mega-cap tech watchlist
 
 def send_telegram_message(message: str):
@@ -20,23 +21,67 @@ def send_telegram_message(message: str):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     
     try:
-        response = requests.post(url, json=payload)
+        response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
         print("Telegram message sent successfully.")
     except Exception as e:
         print(f"Failed to send message: {e}")
 
+def fetch_polygon_intraday(ticker_symbol: str) -> pd.DataFrame:
+    """Fetches intraday 5-minute bars from Polygon.io."""
+    if not POLYGON_API_KEY:
+        print("Missing POLYGON_API_KEY environment variable.")
+        return pd.DataFrame()
+
+    # Request the last 14 calendar days to ensure enough warmup for pandas_ta indicators
+    end_date = datetime.datetime.now().date()
+    start_date = end_date - datetime.timedelta(days=14)
+
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_symbol}/range/5/minute/{start_date}/{end_date}"
+    params = {
+        "adjusted": "true",
+        "sort": "asc",
+        "limit": 50000,
+        "apiKey": POLYGON_API_KEY
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+    except Exception as e:
+        print(f"Network error fetching {ticker_symbol}: {e}")
+        return pd.DataFrame()
+
+    if "results" not in data or not data["results"]:
+        print(f"No bar data returned for {ticker_symbol}.")
+        return pd.DataFrame()
+
+    # Convert JSON to DataFrame and normalize column names
+    df = pd.DataFrame(data["results"])
+    df = df.rename(columns={
+        "o": "open",
+        "h": "high",
+        "l": "low",
+        "c": "close",
+        "v": "volume",
+        "t": "timestamp"
+    })
+
+    # Convert Unix ms timestamps to US/Eastern market time
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df.set_index("timestamp", inplace=True)
+    df.index = df.index.tz_convert("America/New_York")
+
+    # Filter strictly for regular trading hours (9:30 AM to 4:00 PM ET)
+    df = df.between_time("09:30", "16:00").copy()
+    
+    return df
+
 def check_ttm_squeeze(ticker: str):
     """Pulls 5-minute data to detect active TTM Squeeze breakouts."""
-    # Pulling 10 days of 5-minute data ensures enough warmup for pandas_ta to calculate the indicator accurately
-    df = yf.download(ticker, period="10d", interval="5m", progress=False)
-    if df.empty: return None
+    df = fetch_polygon_intraday(ticker)
+    if df.empty or len(df) < 28: return None
     
-    # Flatten yfinance MultiIndex columns if present
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df.columns = [c.lower() for c in df.columns]
-
     # 1. Calculate TTM Squeeze
     squeeze_df = df.ta.squeeze(lazybear=False, detailed=True)
     if squeeze_df is None: return None
@@ -81,7 +126,7 @@ def check_ttm_squeeze(ticker: str):
 
 def run_squeeze_scan():
     """Runs the analysis on all tickers and only sends an alert if a squeeze is detected."""
-    print(f"Starting Intraday TTM Squeeze Scan for {len(TICKERS)} mega-cap tickers...")
+    print(f"Starting Intraday TTM Squeeze Scan for {len(TICKERS)} mega-cap tickers via Polygon.io...")
     messages = [f"💥 **Intraday TTM Squeeze Scan** ({datetime.datetime.now().strftime('%b %d, %H:%M ET')})\n"]
     triggers = 0
     
@@ -90,6 +135,10 @@ def run_squeeze_scan():
         if signal:
             messages.append(signal)
             triggers += 1
+            
+        # Polygon's free tier is limited to 5 API calls per minute
+        # Sleeping for 12 seconds perfectly paces the 5 tickers across a full minute
+        time.sleep(12)
             
     # Silent Mode: Only send a Telegram message if an actionable squeeze fired
     if triggers > 0:
