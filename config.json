@@ -1,0 +1,15 @@
+{
+  "intraday_0dte": {
+    "tickers": ["SPY", "QQQ"],
+    "spread_width": 2.0,
+    "rvol_threshold": 1.30,
+    "adx_threshold": 25.0
+  },
+  "swing": {
+    "tickers": ["SPY", "QQQ", "NVDA", "GOOGL", "AAPL", "AMZN"]
+  },
+  "chop": {
+    "tickers": ["SPY", "QQQ"],
+    "adx_ceiling": 20.0
+  }
+}
