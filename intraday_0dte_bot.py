@@ -1,6 +1,7 @@
 import os
 import time
 import datetime
+import json
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
@@ -10,7 +11,14 @@ import requests
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
-TICKERS = ["SPY", "QQQ"]
+
+# --- LOAD CENTRAL CONFIGURATION ---
+def load_config():
+    with open("config.json", "r") as file:
+        return json.load(file)
+
+config = load_config()["intraday_0dte"]
+TICKERS = config["tickers"]
 
 def send_telegram(msg: str):
     """Sends the alert directly to Telegram."""
@@ -114,28 +122,31 @@ def evaluate_intraday_setup(ticker: str):
 
     latest = df.iloc[-1]
     price = latest["close"]
-    spread_width = 2.0  # Defined-risk 2-point spread width
 
-    # Long Call Debit Spread Trigger Logic
+    # Pull dynamic parameters from config
+    spread_width = config["spread_width"]
+    rvol_thresh = config["rvol_threshold"]
+    adx_thresh = config["adx_threshold"]
+
+    # Call Logic
     call_spread = (
         latest["ema_spread_norm"] > 0.15 and
         0.20 <= latest["vwap_dist_norm"] <= 1.10 and
-        latest["rvol"] >= 1.30 and
+        latest["rvol"] >= rvol_thresh and
         latest["close"] > latest["open"] and
-        latest.get("ADX_14", 0) >= 25.0 and
+        latest.get("ADX_14", 0) >= adx_thresh and
         latest.get("DMP_14", 0) > latest.get("DMN_14", 0)
     )
 
-    # Long Put Debit Spread Trigger Logic
+    # Put Logic
     put_spread = (
         latest["ema_spread_norm"] < -0.15 and
         -1.10 <= latest["vwap_dist_norm"] <= -0.20 and
-        latest["rvol"] >= 1.30 and
+        latest["rvol"] >= rvol_thresh and
         latest["close"] < latest["open"] and
-        latest.get("ADX_14", 0) >= 25.0 and
+        latest.get("ADX_14", 0) >= adx_thresh and
         latest.get("DMN_14", 0) > latest.get("DMP_14", 0)
     )
-
     if call_spread:
         long_strike = np.floor(price)
         short_strike = long_strike + spread_width
