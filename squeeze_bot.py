@@ -1,3 +1,4 @@
+import pytz
 import os
 import time
 import datetime
@@ -5,7 +6,6 @@ import json
 import pandas as pd
 import pandas_ta as ta
 import requests
-import pytz
 
 # --- SECRETS LOADED FROM GITHUB ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
