@@ -1,45 +1,78 @@
 import os
+import time
 import datetime
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import pandas_ta as ta
 import requests
 
-# --- SECRETS LOADED FROM GITHUB ---
+# --- SECRETS LOADED FROM GITHUB ACTIONS ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
 TICKERS = ["SPY", "QQQ"]
 
 def send_telegram(msg: str):
-    """Sends the breakout alert to Telegram."""
+    """Sends the alert directly to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Missing Telegram credentials.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}
-    requests.post(url, json=payload)
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Failed to send Telegram message: {e}")
 
-def fetch_intraday_data(ticker_symbol: str):
-    """Fetches intraday 5-minute bars and computes cumulative day-anchored VWAP."""
-    ticker = yf.Ticker(ticker_symbol)
-    df = ticker.history(period="5d", interval="5m")
-
-    if df.empty:
+def fetch_polygon_intraday(ticker_symbol: str) -> pd.DataFrame:
+    """Fetches intraday 5-minute bars from Polygon.io and computes session VWAP."""
+    if not POLYGON_API_KEY:
+        print("Missing POLYGON_API_KEY environment variable.")
         return pd.DataFrame()
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    # Request the last 7 calendar days to ensure at least 5 full trading days
+    end_date = datetime.datetime.now().date()
+    start_date = end_date - datetime.timedelta(days=7)
 
-    df.columns = [c.lower() for c in df.columns]
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_symbol}/range/5/minute/{start_date}/{end_date}"
+    params = {
+        "adjusted": "true",
+        "sort": "asc",
+        "limit": 50000,
+        "apiKey": POLYGON_API_KEY
+    }
 
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC").tz_convert("America/New_York")
-    else:
-        df.index = df.index.tz_convert("America/New_York")
+    try:
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
+    except Exception as e:
+        print(f"Network error fetching {ticker_symbol}: {e}")
+        return pd.DataFrame()
 
+    if "results" not in data or not data["results"]:
+        print(f"No bar data returned for {ticker_symbol}.")
+        return pd.DataFrame()
+
+    # Convert JSON response to DataFrame and normalize columns
+    df = pd.DataFrame(data["results"])
+    df = df.rename(columns={
+        "o": "open",
+        "h": "high",
+        "l": "low",
+        "c": "close",
+        "v": "volume",
+        "t": "timestamp"
+    })
+
+    # Convert Unix millisecond timestamps to localized US/Eastern market time
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df.set_index("timestamp", inplace=True)
+    df.index = df.index.tz_convert("America/New_York")
+
+    # Filter strictly for regular market hours (9:30 AM to 4:00 PM ET)
     df = df.between_time("09:30", "16:00").copy()
 
+    # Compute Day-Anchored VWAP
     df["date"] = df.index.date
     typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
     df["cum_vp"] = (typical_price * df["volume"]).groupby(df["date"]).cumsum()
@@ -49,109 +82,93 @@ def fetch_intraday_data(ticker_symbol: str):
 
     return df
 
-def generate_intraday_signals(
-    df: pd.DataFrame, fast_ema=9, slow_ema=21, atr_period=14, 
-    rvol_window=20, adx_period=14, adx_threshold=25.0
-) -> pd.DataFrame:
-    """Computes dynamic multi-factor entry thresholds for intraday directional debit spreads."""
-    df = df.copy()
+def evaluate_intraday_setup(ticker: str):
+    """Calculates EMAs, VWAP displacement, RVOL, and ADX/DMI for momentum entries."""
+    df = fetch_polygon_intraday(ticker)
+    if df.empty or len(df) < 28:
+        return None
 
-    df["ema_fast"] = df["close"].ewm(span=fast_ema, adjust=False).mean()
-    df["ema_slow"] = df["close"].ewm(span=slow_ema, adjust=False).mean()
-
+    # 1. ATR (14) for dynamic normalization
     tr1 = df["high"] - df["low"]
     tr2 = (df["high"] - df["close"].shift(1)).abs()
     tr3 = (df["low"] - df["close"].shift(1)).abs()
     df["tr"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df["atr"] = df["tr"].rolling(window=atr_period).mean()
+    df["atr"] = df["tr"].rolling(window=14).mean()
 
-    df["ema_spread_norm"] = (df["ema_fast"] - df["ema_slow"]) / df["atr"]
+    # 2. EMAs and Normalized Distances
+    df["ema_9"] = df["close"].ewm(span=9, adjust=False).mean()
+    df["ema_21"] = df["close"].ewm(span=21, adjust=False).mean()
+    df["ema_spread_norm"] = (df["ema_9"] - df["ema_21"]) / df["atr"]
     df["vwap_dist_norm"] = (df["close"] - df["vwap"]) / df["atr"]
 
-    df["vol_ma"] = df["volume"].rolling(window=rvol_window).mean()
+    # 3. Relative Volume (RVOL) against 20-period baseline
+    df["vol_ma"] = df["volume"].rolling(window=20).mean()
     df["rvol"] = df["volume"] / df["vol_ma"]
 
-    adx_df = ta.adx(df["high"], df["low"], df["close"], length=adx_period)
-    adx_col, dmp_col, dmn_col = f"ADX_{adx_period}", f"DMP_{adx_period}", f"DMN_{adx_period}"
-    
-    if adx_df is not None:
+    # 4. ADX and DMI (14) Trend Strength
+    adx_df = ta.adx(df["high"], df["low"], df["close"], length=14)
+    if adx_df is not None and not adx_df.empty:
         df = pd.concat([df, adx_df], axis=1)
     else:
-        df[adx_col], df[dmp_col], df[dmn_col] = 0.0, 0.0, 0.0
+        df["ADX_14"], df["DMP_14"], df["DMN_14"] = 0.0, 0.0, 0.0
 
-    squeeze_df = df.ta.squeeze(lazybear=False, detailed=True)
-    if squeeze_df is not None:
-        df = pd.concat([df, squeeze_df], axis=1)
-        sqz_on_col = [c for c in df.columns if "SQZ_ON" in c][0]
-        sqz_off_col = [c for c in df.columns if "SQZ_OFF" in c][0]
-        hist_col = [c for c in df.columns if "SQZ" in c and "ON" not in c and "OFF" not in c and "NO" not in c][0]
-        
-        df["squeeze_firing"] = (df[sqz_off_col] == 1) & (df[sqz_on_col].shift(1) == 1)
-        df["hist_light_blue"] = (df[hist_col] > 0) & (df[hist_col] > df[hist_col].shift(1))
-        df["hist_red"] = (df[hist_col] < 0) & (df[hist_col] < df[hist_col].shift(1))
-    else:
-        df["squeeze_firing"], df["hist_light_blue"], df["hist_red"] = False, False, False
+    latest = df.iloc[-1]
+    price = latest["close"]
+    spread_width = 2.0  # Defined-risk 2-point spread width
 
-    time = df.index.time
-    session_active = (
-        ((time >= pd.to_datetime("09:50:00").time()) & (time <= pd.to_datetime("11:30:00").time())) |
-        ((time >= pd.to_datetime("13:45:00").time()) & (time <= pd.to_datetime("15:15:00").time()))
+    # Long Call Debit Spread Trigger Logic
+    call_spread = (
+        latest["ema_spread_norm"] > 0.15 and
+        0.20 <= latest["vwap_dist_norm"] <= 1.10 and
+        latest["rvol"] >= 1.30 and
+        latest["close"] > latest["open"] and
+        latest.get("ADX_14", 0) >= 25.0 and
+        latest.get("DMP_14", 0) > latest.get("DMN_14", 0)
     )
 
-    call_spread_trigger = (
-        session_active & (df["ema_spread_norm"] > 0.15) & (df["vwap_dist_norm"] >= 0.20) &
-        (df["vwap_dist_norm"] <= 1.10) & (df["rvol"] >= 1.30) & (df["close"] > df["open"]) &
-        (df[adx_col] >= adx_threshold) & (df[dmp_col] > df[dmn_col]) & 
-        df["squeeze_firing"] & df["hist_light_blue"]
+    # Long Put Debit Spread Trigger Logic
+    put_spread = (
+        latest["ema_spread_norm"] < -0.15 and
+        -1.10 <= latest["vwap_dist_norm"] <= -0.20 and
+        latest["rvol"] >= 1.30 and
+        latest["close"] < latest["open"] and
+        latest.get("ADX_14", 0) >= 25.0 and
+        latest.get("DMN_14", 0) > latest.get("DMP_14", 0)
     )
 
-    put_spread_trigger = (
-        session_active & (df["ema_spread_norm"] < -0.15) & (df["vwap_dist_norm"] <= -0.20) &
-        (df["vwap_dist_norm"] >= -1.10) & (df["rvol"] >= 1.30) & (df["close"] < df["open"]) &
-        (df[adx_col] >= adx_threshold) & (df[dmn_col] > df[dmp_col]) & 
-        df["squeeze_firing"] & df["hist_red"]
-    )
+    if call_spread:
+        long_strike = np.floor(price)
+        short_strike = long_strike + spread_width
+        return (
+            f"🟢 **{ticker} 0DTE CALL SPREAD**\n"
+            f"Price: ${price:.2f} | Strong Bullish Momentum\n"
+            f"• RVOL: {latest['rvol']:.2f}x | ADX: {latest.get('ADX_14', 0):.1f}\n"
+            f"• Strikes: Buy ${long_strike:.0f}C / Sell ${short_strike:.0f}C"
+        )
+    elif put_spread:
+        long_strike = np.ceil(price)
+        short_strike = long_strike - spread_width
+        return (
+            f"🔴 **{ticker} 0DTE PUT SPREAD**\n"
+            f"Price: ${price:.2f} | Strong Bearish Momentum\n"
+            f"• RVOL: {latest['rvol']:.2f}x | ADX: {latest.get('ADX_14', 0):.1f}\n"
+            f"• Strikes: Buy ${long_strike:.0f}P / Sell ${short_strike:.0f}P"
+        )
 
-    df["signal"] = 0
-    df.loc[call_spread_trigger, "signal"] = 1
-    df.loc[put_spread_trigger, "signal"] = -1
-    df["entry_signal"] = np.where((df["signal"] != 0) & (df["signal"] != df["signal"].shift(1)), df["signal"], 0)
-
-    return df
+    return None
 
 def run_intraday_scan():
-    print("Running SPY & QQQ Intraday 0DTE Scan...")
+    print("Running 0DTE Intraday Scan via Polygon.io...")
     messages = [f"⚡ **0DTE Intraday Scanner** ({datetime.datetime.now().strftime('%H:%M ET')})\n"]
     triggers = 0
-    
+
     for ticker in TICKERS:
-        raw_df = fetch_intraday_data(ticker)
-        if raw_df.empty:
-            continue
-            
-        proc_df = generate_intraday_signals(raw_df)
-        latest = proc_df.iloc[-1]
-        
-        sig_val = latest["entry_signal"]
-        price = latest["close"]
-        spread_width = 2.0
-        
-        if sig_val == 1:
-            long_strike = np.floor(price)
-            short_strike = long_strike + spread_width
-            messages.append(f"🟢 **{ticker} 0DTE CALL SPREAD**\nPrice: ${price:.2f} | Momentum Confirmed (Squeeze + ADX + VWAP)\nBuy ${long_strike:.0f}C / Sell ${short_strike:.0f}C")
+        signal = evaluate_intraday_setup(ticker)
+        if signal:
+            messages.append(signal)
             triggers += 1
-        elif sig_val == -1:
-            long_strike = np.ceil(price)
-            short_strike = long_strike - spread_width
-            messages.append(f"🔴 **{ticker} 0DTE PUT SPREAD**\nPrice: ${price:.2f} | Momentum Confirmed (Squeeze + ADX + VWAP)\nBuy ${long_strike:.0f}P / Sell ${short_strike:.0f}P")
-            triggers += 1
-            
-    if triggers > 0:
-        send_telegram("\n\n".join(messages))
-        print("Alerts triggered and sent.")
-    else:
-        print("No active 0DTE signals found. Remaining silent.")
+        time.sleep(1)  # Buffer between API requests
+
 
 if __name__ == "__main__":
     run_intraday_scan()
