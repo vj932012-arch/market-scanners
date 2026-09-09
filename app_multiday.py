@@ -49,13 +49,14 @@ def get_secret(key: str, default: str = "") -> str:
 # ---------------------------------------------------------
 # Data Fetching & Indicators
 # ---------------------------------------------------------
-@st.cache_data(ttl=3600)
+# FIX: Reduced cache TTL to 5 minutes (300 seconds) so live data refreshes more frequently
+@st.cache_data(ttl=300)
 def fetch_daily_data(ticker: str) -> pd.DataFrame:
     """Fetches daily candlestick data and normalizes column headers."""
     df = yf.Ticker(ticker).history(period="1y", interval="1d")
     if df.empty:
         return df
-    
+
     # Flatten MultiIndex columns if present
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -138,6 +139,13 @@ def get_spread_recommendation(price: float, atr: float, signal: int):
 # Sidebar: Automated Workflow Trigger Controls
 # ---------------------------------------------------------
 st.sidebar.header("⚡ Workflow & Bot Controls")
+
+# FIX: Added a manual cache bust button to force a fresh data pull[span_2](start_span)[span_2](end_span)[span_3](start_span)[span_3](end_span)
+if st.sidebar.button("🔄 Force Refresh Data"):
+    st.cache_data.clear()
+    st.rerun()
+
+st.sidebar.markdown("---")
 
 gh_token = get_secret("GH_PAT")
 gh_repo = get_secret("GH_REPO")
@@ -264,4 +272,10 @@ for i, ticker in enumerate(TICKERS):
         fig.update_xaxes(fixedrange=False)
         fig.update_yaxes(fixedrange=False)
 
-        st.plotly_chart(fig, use_container_width=True, config={"scrollZoom": True, "displayModeBar": False})
+        # FIX: Added unique keys tracking the ticker string so Streamlit properly retains chart state across tabs[span_4](start_span)[span_4](end_span)[span_5](start_span)[span_5](end_span)
+        st.plotly_chart(
+            fig, 
+            use_container_width=True, 
+            config={"scrollZoom": True, "displayModeBar": False},
+            key=f"chart_{ticker}"
+        )
