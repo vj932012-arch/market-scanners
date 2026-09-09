@@ -1,5 +1,6 @@
 import os
 import datetime
+import json
 import pandas as pd
 import yfinance as yf
 import pandas_ta as ta
@@ -8,7 +9,14 @@ import requests
 # --- SECRETS LOADED FROM GITHUB ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-TICKERS = ["SPY", "QQQ", "NVDA", "GOOGL", "AAPL", "AMZN"]
+
+# --- LOAD CENTRAL CONFIGURATION ---
+def load_config():
+    with open("config.json", "r") as file:
+        return json.load(file)
+
+config = load_config()["swing"]
+TICKERS = config["tickers"]
 
 def send_telegram_message(message: str):
     """Sends a push notification directly to your phone via Telegram."""

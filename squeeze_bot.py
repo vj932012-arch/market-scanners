@@ -1,6 +1,7 @@
 import os
 import time
 import datetime
+import json
 import pandas as pd
 import pandas_ta as ta
 import requests
@@ -9,7 +10,14 @@ import requests
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
-TICKERS = ["SPY", "QQQ", "GOOGL", "NVDA", "AMZN"] # Your mega-cap tech watchlist
+
+# --- LOAD CENTRAL CONFIGURATION ---
+def load_config():
+    with open("config.json", "r") as file:
+        return json.load(file)
+
+config = load_config()["squeeze"]
+TICKERS = config["tickers"]
 
 def send_telegram_message(message: str):
     """Sends a push notification directly to your phone via Telegram."""
@@ -82,6 +90,9 @@ def check_ttm_squeeze(ticker: str):
     df = fetch_polygon_intraday(ticker)
     if df.empty or len(df) < 28: return None
     
+    # Pull dynamic parameters from config
+    adx_thresh = config["adx_threshold"]
+    
     # 1. Calculate TTM Squeeze
     squeeze_df = df.ta.squeeze(lazybear=False, detailed=True)
     if squeeze_df is None: return None
@@ -115,12 +126,12 @@ def check_ttm_squeeze(ticker: str):
     hist_red = (latest["HISTOGRAM"] < 0) and (latest["HISTOGRAM"] < prev["HISTOGRAM"])
     
     # TRIGGER 3: ADX Trend Strength Confirmation
-    strong_trend = latest.get("ADX_14", 0) >= 25.0
+    strong_trend = latest.get("ADX_14", 0) >= adx_thresh
     
     if squeeze_firing and hist_light_blue and strong_trend:
-        return f"🟢 **{ticker} SQUEEZE FIRED: CALL SPREAD**\nPrice: ${price:.2f} | Momentum expanding UPWARD (Light Blue) with ADX >= 25."
+        return f"🟢 **{ticker} SQUEEZE FIRED: CALL SPREAD**\nPrice: ${price:.2f} | Momentum expanding UPWARD (Light Blue) with ADX >= {adx_thresh}."
     elif squeeze_firing and hist_red and strong_trend:
-        return f"🔴 **{ticker} SQUEEZE FIRED: PUT SPREAD**\nPrice: ${price:.2f} | Momentum expanding DOWNWARD (Red) with ADX >= 25."
+        return f"🔴 **{ticker} SQUEEZE FIRED: PUT SPREAD**\nPrice: ${price:.2f} | Momentum expanding DOWNWARD (Red) with ADX >= {adx_thresh}."
         
     return None
 
@@ -137,7 +148,7 @@ def run_squeeze_scan():
             triggers += 1
             
         # Polygon's free tier is limited to 5 API calls per minute
-        # Sleeping for 12 seconds perfectly paces the 5 tickers across a full minute
+        # Sleeping for 12 seconds perfectly paces the tickers across a full minute
         time.sleep(12)
             
     # Silent Mode: Only send a Telegram message if an actionable squeeze fired
