@@ -1,6 +1,5 @@
 import os
 import datetime
-import csv
 import json
 import pandas as pd
 import yfinance as yf
@@ -34,23 +33,6 @@ def send_telegram_message(message: str):
         print("Telegram message sent successfully.")
     except Exception as e:
         print(f"Failed to send message: {e}")
-
-def log_trade(ticker, strategy, signal, price):
-    """Appends triggered alerts to a local CSV file."""
-    file_path = "trade_logs.csv"
-    file_exists = os.path.isfile(file_path)
-    
-    with open(file_path, mode="a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["Timestamp", "Ticker", "Strategy", "Signal", "Price"])
-        writer.writerow([
-            datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
-            ticker, 
-            strategy, 
-            signal, 
-            f"${price:.2f}"
-        ])
 
 def get_daily_signals(ticker: str):
     """Fetches daily data and calculates swing thresholds."""
@@ -96,12 +78,10 @@ def get_daily_signals(ticker: str):
     if call_trigger:
         long_strike = round(price)
         short_strike = long_strike + spread_width
-        log_trade(ticker, "Multi-Day Swing", "CALL SPREAD", price)
         return f"🟢 **{ticker} CALL SPREAD**\nPrice: ${price:.2f} | Buy ${long_strike}C / Sell ${short_strike}C"
     elif put_trigger:
         long_strike = round(price)
         short_strike = long_strike - spread_width
-        log_trade(ticker, "Multi-Day Swing", "PUT SPREAD", price)
         return f"🔴 **{ticker} PUT SPREAD**\nPrice: ${price:.2f} | Buy ${long_strike}P / Sell ${short_strike}P"
         
     return None
