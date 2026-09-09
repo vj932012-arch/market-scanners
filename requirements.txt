@@ -6,3 +6,4 @@ plotly
 pytz
 tzdata
 pandas-ta
+requests
