@@ -5,6 +5,7 @@ import json
 import pandas as pd
 import pandas_ta as ta
 import requests
+import pytz
 
 # --- SECRETS LOADED FROM GITHUB ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -136,9 +137,12 @@ def check_ttm_squeeze(ticker: str):
     return None
 
 def run_squeeze_scan():
-    """Runs the analysis on all tickers and only sends an alert if a squeeze is detected."""
+    """Runs the analysis on all tickers and sends an alert."""
     print(f"Starting Intraday TTM Squeeze Scan for {len(TICKERS)} mega-cap tickers via Polygon.io...")
-    messages = [f"💥 **Intraday TTM Squeeze Scan** ({datetime.datetime.now().strftime('%b %d, %H:%M ET')})\n"]
+    
+    # Fix the UTC time bug so it prints actual Eastern Time
+    now_et = datetime.datetime.now(pytz.timezone('US/Eastern')).strftime('%H:%M ET')
+    messages = [f"💥 **Intraday TTM Squeeze Scan** ({now_et})\n"]
     triggers = 0
     
     for ticker in TICKERS:
@@ -151,13 +155,13 @@ def run_squeeze_scan():
         # Sleeping for 12 seconds perfectly paces the tickers across a full minute
         time.sleep(12)
             
-    # Silent Mode: Only send a Telegram message if an actionable squeeze fired
-    if triggers > 0:
-        final_message = "\n\n".join(messages)
-        print(final_message)
-        send_telegram_message(final_message)
-    else:
-        print("No active squeeze breakouts right now. Remaining silent.")
+    # Heartbeat message logic: Send a text even if the market is choppy
+    if triggers == 0:
+        messages.append("⚪ No active squeeze breakouts right now.")
+
+    final_message = "\n\n".join(messages)
+    print(final_message)
+    send_telegram_message(final_message)
 
 if __name__ == "__main__":
     run_squeeze_scan()
