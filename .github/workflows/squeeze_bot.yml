@@ -2,24 +2,30 @@ name: Hourly TTM Squeeze Scanner
 
 on:
   schedule:
-    # Runs at minute 0 past every hour from 10:00 AM to 4:00 PM Eastern Time
-    # Mon-Fri (1-5)
-    - cron: '0 10-16 * * 1-5'
-      timezone: 'America/New_York'
+    # Runs at minute 0 past every hour from 3:00 PM to 9:00 PM UTC
+    # (10 AM to 4 PM ET, Mon-Fri)
+    - cron: '0 15-21 * * 1-5'
   workflow_dispatch: # Allows you to manually trigger a scan anytime
 
 jobs:
   scan-intraday-squeeze:
     runs-on: ubuntu-latest
+    timeout-minutes: 10  # Prevent runaway jobs
+    permissions:
+      contents: read
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1  # Only fetch the latest commit
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           # Pin to 3.12 to prevent the pandas-ta install crash
-          python-version: '3.12' 
+          python-version: '3.12'
+          cache: 'pip'  # Cache pip dependencies
 
       - name: Install dependencies
         run: |
@@ -33,3 +39,15 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: python squeeze_bot.py
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ Squeeze bot scan failed at $(date)"
+          # Add optional failure notifications here (e.g., Telegram, email)
+
+      - name: Notify on success
+        if: success()
+        run: |
+          echo "✅ Squeeze bot scan completed successfully at $(date)"
+          # Add optional success notifications here
