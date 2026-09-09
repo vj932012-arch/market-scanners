@@ -1,1 +1,35 @@
+name: Intraday 0DTE Spread Scanner
 
+on:
+  schedule:
+    # Runs at minute 0 and 30 past every hour from 14:00 to 20:00 UTC (10 AM - 4 PM EDT)
+    # Mon-Fri (1-5)
+    - cron: '*/30 14-20 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  scan-intraday:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # Pin to 3.12 to prevent the pandas-ta install crash
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Intraday Bot
+        env:
+          # Pulls your existing Telegram credentials securely
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python intraday_0dte_bot.py
+        
