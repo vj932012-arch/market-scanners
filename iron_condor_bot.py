@@ -82,7 +82,7 @@ def fetch_polygon_data(ticker_symbol: str, days: int = LOOKBACK_DAYS) -> pd.Data
     end_date = datetime.now().date()
     start_date = end_date - timedelta(days=days)
 
-    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_symbol}/range/1/day/{start_date}/{end_date}"
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_symbol}/range/15/minute/{start_date}/{end_date}"
     params = {
         "adjusted": "true",
         "sort": "asc",
