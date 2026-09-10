@@ -28,7 +28,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python iron_condor_bot.py once
+          python iron_condor_bot.py
       
       - name: Log Analysis Result
         if: always()
