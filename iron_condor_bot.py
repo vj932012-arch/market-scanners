@@ -1,17 +1,16 @@
 """
-Iron Condor Bot with Telegram Alerts
+Iron Condor Bot with Telegram Alerts (Polygon.io Integration)
 Monitors SPY for ideal setups and sends alerts via Telegram
 """
 
-import yfinance as yf
-import pandas as pd
-import pandas_ta as ta
-import numpy as np
-from datetime import datetime
-import pytz
 import os
 import requests
 import sys
+import numpy as np
+import pandas as pd
+import pandas_ta as ta
+import pytz
+from datetime import datetime, timedelta
 from typing import Dict, Tuple
 
 # ---------------------------------------------------------
@@ -22,20 +21,24 @@ LOOKBACK_DAYS = 90  # Ensure 50+ trading days for SMA_50
 PERIOD_SHORT = 14
 PERIOD_LONG = 50
 
+# Strike & Delta Configuration
+DELTA_ATR_MULTIPLIER = 2.0  # Target Delta: ~16 Delta / 1 SD
+WING_WIDTH = 2.0            # Defined-risk spread width in dollars
+
 # Setup Parameters
 IC_SETUP = {
     "rsi_sell_threshold": 70,      
     "rsi_buy_threshold": 30,       
-    "atr_multiplier": 1.5,
     "bb_threshold": 2.0,
     "volatility_min": 0.01,
     "volatility_max": 0.85,
     "min_score": 70.0,             
 }
 
-# Telegram Configuration
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Secrets loaded from GitHub Actions
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # ---------------------------------------------------------
@@ -73,21 +76,51 @@ def send_telegram_alert(message: str, parse_mode: str = "HTML") -> bool:
 # ---------------------------------------------------------
 # Data Analysis Functions
 # ---------------------------------------------------------
-def fetch_spy_data(ticker=TICKER, days=LOOKBACK_DAYS) -> pd.DataFrame:
-    """Fetch historical SPY data"""
+def fetch_polygon_data(ticker_symbol: str, days: int = LOOKBACK_DAYS) -> pd.DataFrame:
+    """Fetches daily bars from Polygon.io."""
+    if not POLYGON_API_KEY:
+        print("Missing POLYGON_API_KEY environment variable.")
+        return pd.DataFrame()
+
+    end_date = datetime.now().date()
+    start_date = end_date - timedelta(days=days)
+
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_symbol}/range/1/day/{start_date}/{end_date}"
+    params = {
+        "adjusted": "true",
+        "sort": "asc",
+        "limit": 50000,
+        "apiKey": POLYGON_API_KEY
+    }
+
     try:
-        df = yf.download(ticker, period=f"{days}d", progress=False)
-        if df.empty:
-            return None
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.columns = [c.lower() for c in df.columns]
-
-        return df
+        response = requests.get(url, params=params, timeout=15)
+        data = response.json()
     except Exception as e:
-        print(f"✗ Error fetching data: {e}")
-        return None
+        print(f"Network error fetching {ticker_symbol}: {e}")
+        return pd.DataFrame()
+
+    if "results" not in data or not data["results"]:
+        print(f"No bar data returned for {ticker_symbol}.")
+        return pd.DataFrame()
+
+    # Convert JSON to DataFrame and normalize column names
+    df = pd.DataFrame(data["results"])
+    df = df.rename(columns={
+        "o": "open",
+        "h": "high",
+        "l": "low",
+        "c": "close",
+        "v": "volume",
+        "t": "timestamp"
+    })
+
+    # Convert Unix ms timestamps to US/Eastern market time
+    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df.set_index("timestamp", inplace=True)
+    df.index = df.index.tz_convert("America/New_York")
+    
+    return df
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate technical indicators"""
@@ -108,7 +141,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df_calc['SMA_14'] = ta.sma(df_calc['close'], length=PERIOD_SHORT)
     df_calc['SMA_50'] = ta.sma(df_calc['close'], length=PERIOD_LONG)
 
-    # Volatility
+    # Volatility (IV Rank Proxy)
     df_calc['Volatility'] = df_calc['close'].pct_change().rolling(window=20).std() * np.sqrt(252)
 
     return df_calc
@@ -190,25 +223,36 @@ def identify_ic_setup(df: pd.DataFrame) -> Tuple[int, float, Dict]:
 
     return signal, score, details
 
-def calculate_ic_levels(close_price: float, atr: float, signal: int) -> Dict:
-    """Calculate strike levels"""
-    levels = {}
-    strike_width = atr * IC_SETUP['atr_multiplier']
+def calculate_ic_levels(close_price: float, atr: float, signal: int = 0) -> Dict:
+    """Calculate tradeable, rounded Iron Condor strike levels."""
+    short_distance = atr * DELTA_ATR_MULTIPLIER
 
-    if signal == 1:  # Call Spread
-        levels['short_call'] = close_price + strike_width
-        levels['long_call'] = close_price + (strike_width * 2)
-        levels['short_put'] = close_price - (strike_width * 0.5)
-        levels['long_put'] = close_price - (strike_width * 1.5)
-    elif signal == -1:  # Put Spread
-        levels['short_put'] = close_price - strike_width
-        levels['long_put'] = close_price - (strike_width * 2)
-        levels['short_call'] = close_price + (strike_width * 0.5)
-        levels['long_call'] = close_price + (strike_width * 1.5)
+    # Asymmetric skewing based on trend signal
+    if signal == 1:
+        call_buffer = short_distance * 1.2
+        put_buffer = short_distance * 0.8
+    elif signal == -1:
+        call_buffer = short_distance * 0.8
+        put_buffer = short_distance * 1.2
+    else:
+        call_buffer = short_distance
+        put_buffer = short_distance
 
-    levels['max_profit_range_low'] = levels.get('long_put', close_price - strike_width)
-    levels['max_profit_range_high'] = levels.get('long_call', close_price + strike_width)
-    return levels
+    short_call = round(close_price + call_buffer)
+    long_call = round(short_call + WING_WIDTH)
+
+    short_put = round(close_price - put_buffer)
+    long_put = round(short_put - WING_WIDTH)
+
+    return {
+        "short_call": short_call,
+        "long_call": long_call,
+        "short_put": short_put,
+        "long_put": long_put,
+        "wing_width": WING_WIDTH,
+        "max_profit_range_low": short_put,
+        "max_profit_range_high": short_call,
+    }
 
 def format_alert_message(signal: int, score: float, details: Dict, levels: Dict) -> str:
     """Format active alert message for Telegram"""
@@ -230,13 +274,12 @@ def format_alert_message(signal: int, score: float, details: Dict, levels: Dict)
     if levels:
         message += f"""
 
-<b>Suggested Strikes:</b>
-Short Call: ${levels['short_call']:.2f}
-Long Call: ${levels['long_call']:.2f}
-Short Put: ${levels['short_put']:.2f}
-Long Put: ${levels['long_put']:.2f}
+<b>Suggested Strikes (16 Delta, ${levels['wing_width']}-Wide Wings):</b>
+Short Call: ${levels['short_call']:.2f} / Long Call: ${levels['long_call']:.2f}
+Short Put: ${levels['short_put']:.2f} / Long Put: ${levels['long_put']:.2f}
 
-<b>Profit Range:</b> ${levels['max_profit_range_low']:.2f} - ${levels['max_profit_range_high']:.2f}"""
+<b>Max Profit Zone:</b> ${levels['max_profit_range_low']:.2f} - ${levels['max_profit_range_high']:.2f}
+<b>Defined Collateral:</b> ${levels['wing_width'] * 100:.2f}"""
 
     message += f"\n\n<b>Timestamp:</b> {now_et}"
     return message
@@ -245,7 +288,6 @@ def format_heartbeat_message(score: float, details: Dict) -> str:
     """Format heartbeat status message when no actionable setup is detected"""
     now_et = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S ET')
     
-    # Safely handle NaN RSI values
     rsi_val = details.get('rsi')
     rsi_str = f"{rsi_val:.1f}" if rsi_val is not None and not np.isnan(rsi_val) else "N/A"
 
@@ -272,14 +314,13 @@ def format_heartbeat_message(score: float, details: Dict) -> str:
 # ---------------------------------------------------------
 def run_analysis_once():
     """Run analysis once and dispatch to Telegram unconditionally"""
-    print(f"Running single analysis on {TICKER}...")
+    print(f"Running single analysis on {TICKER} via Polygon.io...")
 
-    df = fetch_spy_data()
+    df = fetch_polygon_data(TICKER)
     if df is None or len(df) < 50:
-        print("✗ Insufficient data fetched from Yahoo Finance.")
-        # Send a heartbeat even for data failures so you know the bot ran
+        print("✗ Insufficient data fetched from Polygon.io.")
         now_et = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S ET')
-        send_telegram_alert(f"⚠️ <b>Iron Condor Bot Heartbeat</b>\n\nCould not fetch sufficient data for {TICKER}.\n\n<b>Timestamp:</b> {now_et}")
+        send_telegram_alert(f"⚠️ <b>Iron Condor Bot Heartbeat</b>\n\nCould not fetch sufficient data for {TICKER} via Polygon.\n\n<b>Timestamp:</b> {now_et}")
         return
 
     df = calculate_indicators(df)
@@ -287,14 +328,12 @@ def run_analysis_once():
 
     print(f"Price: ${details['price']:.2f} | RSI: {details['rsi']:.1f} | Score: {score:.0f}/100")
 
-    # Check alert conditions
     if signal != 0 and score >= IC_SETUP['min_score']:
         levels = calculate_ic_levels(details['price'], details['atr'], signal)
         message = format_alert_message(signal, score, details, levels)
         print("📬 Actionable setup detected! Sending alert to Telegram...")
         send_telegram_alert(message)
     else:
-        # HEARTBEAT MODE: Send status even when conditions are not met
         message = format_heartbeat_message(score, details)
         print("⚪ Score below threshold or no directional signal. Sending heartbeat to Telegram...")
         send_telegram_alert(message)
@@ -310,9 +349,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         if sys.argv[1] == "test":
             test_telegram_connection()
-        elif sys.argv[1] == "once":
-            run_analysis_once()
         else:
-            print("Usage: python iron_condor_bot.py [test|once]")
+            print("Usage: python iron_condor_bot.py [test]")
     else:
         run_analysis_once()
