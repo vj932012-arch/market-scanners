@@ -7,7 +7,8 @@ import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
+import pytz
 import os
 import requests
 import sys
@@ -17,19 +18,19 @@ from typing import Dict, Tuple
 # Configuration
 # ---------------------------------------------------------
 TICKER = "SPY"
-LOOKBACK_DAYS = 90  # Increased to 90 to ensure 50+ trading days for SMA_50
+LOOKBACK_DAYS = 90  # Ensure 50+ trading days for SMA_50
 PERIOD_SHORT = 14
 PERIOD_LONG = 50
 
 # Setup Parameters
 IC_SETUP = {
-    "rsi_sell_threshold": 70,      # Upper RSI for Put Spread
-    "rsi_buy_threshold": 30,       # Lower RSI for Call Spread
+    "rsi_sell_threshold": 70,      
+    "rsi_buy_threshold": 30,       
     "atr_multiplier": 1.5,
     "bb_threshold": 2.0,
     "volatility_min": 0.01,
     "volatility_max": 0.85,
-    "min_score": 70.0,             # Minimum score to trigger alert
+    "min_score": 70.0,             
 }
 
 # Telegram Configuration
@@ -59,7 +60,7 @@ def send_telegram_alert(message: str, parse_mode: str = "HTML") -> bool:
         )
 
         if response.status_code == 200:
-            print("✓ Telegram alert sent successfully.")
+            print("✓ Telegram message sent successfully.")
             return True
         else:
             print(f"✗ Telegram error ({response.status_code}): {response.text}")
@@ -210,7 +211,8 @@ def calculate_ic_levels(close_price: float, atr: float, signal: int) -> Dict:
     return levels
 
 def format_alert_message(signal: int, score: float, details: Dict, levels: Dict) -> str:
-    """Format alert message for Telegram"""
+    """Format active alert message for Telegram"""
+    now_et = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S ET')
     signal_type = "🟢 CALL SPREAD" if signal == 1 else "🔴 PUT SPREAD"
 
     message = f"""<b>{signal_type} SIGNAL - Setup Score: {score:.0f}/100</b>
@@ -236,19 +238,48 @@ Long Put: ${levels['long_put']:.2f}
 
 <b>Profit Range:</b> ${levels['max_profit_range_low']:.2f} - ${levels['max_profit_range_high']:.2f}"""
 
-    message += f"\n\n<b>Timestamp:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    message += f"\n\n<b>Timestamp:</b> {now_et}"
+    return message
+
+def format_heartbeat_message(score: float, details: Dict) -> str:
+    """Format heartbeat status message when no actionable setup is detected"""
+    now_et = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S ET')
+    
+    # Safely handle NaN RSI values
+    rsi_val = details.get('rsi')
+    rsi_str = f"{rsi_val:.1f}" if rsi_val is not None and not np.isnan(rsi_val) else "N/A"
+
+    message = f"""<b>🦅 IRON CONDOR SCANNER (Heartbeat)</b>
+
+<b>Status:</b> ⚪ Monitoring (No setup triggered)
+<b>Score:</b> {score:.0f}/100 (Threshold: {IC_SETUP['min_score']:.0f})
+
+<b>Current Price:</b> ${details['price']:.2f}
+<b>RSI:</b> {rsi_str}
+<b>ATR:</b> ${details['atr']:.2f}
+<b>IV Rank:</b> {details['iv_rank']:.1%}
+
+<b>Conditions Observed:</b>"""
+
+    for reason in details['reasons']:
+        message += f"\n{reason}"
+
+    message += f"\n\n<b>Timestamp:</b> {now_et}"
     return message
 
 # ---------------------------------------------------------
 # Single-Run Execution for GitHub Actions
 # ---------------------------------------------------------
 def run_analysis_once():
-    """Run analysis once and dispatch to Telegram if conditions trigger"""
+    """Run analysis once and dispatch to Telegram unconditionally"""
     print(f"Running single analysis on {TICKER}...")
 
     df = fetch_spy_data()
     if df is None or len(df) < 50:
         print("✗ Insufficient data fetched from Yahoo Finance.")
+        # Send a heartbeat even for data failures so you know the bot ran
+        now_et = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S ET')
+        send_telegram_alert(f"⚠️ <b>Iron Condor Bot Heartbeat</b>\n\nCould not fetch sufficient data for {TICKER}.\n\n<b>Timestamp:</b> {now_et}")
         return
 
     df = calculate_indicators(df)
@@ -263,13 +294,16 @@ def run_analysis_once():
         print("📬 Actionable setup detected! Sending alert to Telegram...")
         send_telegram_alert(message)
     else:
-        # Silent mode gate (matches your intraday and squeeze bots)
-        print("⚪ Score below threshold or no directional signal. Remaining silent.")
+        # HEARTBEAT MODE: Send status even when conditions are not met
+        message = format_heartbeat_message(score, details)
+        print("⚪ Score below threshold or no directional signal. Sending heartbeat to Telegram...")
+        send_telegram_alert(message)
 
 def test_telegram_connection():
     """Test Telegram bot connection"""
     print("Testing Telegram connection...")
-    message = "🤖 <b>Iron Condor Bot Test</b>\n✓ GitHub Actions connection successful!"
+    now_et = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S ET')
+    message = f"🤖 <b>Iron Condor Bot Test</b>\n✓ GitHub Actions connection successful!\n\n<b>Timestamp:</b> {now_et}"
     send_telegram_alert(message)
 
 if __name__ == "__main__":
