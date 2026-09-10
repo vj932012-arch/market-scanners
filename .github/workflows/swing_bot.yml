@@ -1,9 +1,7 @@
 name: Daily Multi-Day Swing Screener
 
 on:
-  schedule:
-    # 20:30 UTC = 4:30 PM EDT. Runs Monday (1) through Friday (5).
-    - cron: '39 20 * * 1-5'
+
   workflow_dispatch: # This adds the manual trigger button
 
 concurrency:
