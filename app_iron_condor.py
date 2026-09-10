@@ -5,31 +5,31 @@ import pandas_ta as ta
 import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime, timedelta
-import json
 
 # ---------------------------------------------------------
 # Page Configuration
 # ---------------------------------------------------------
 st.set_page_config(page_title="Iron Condor Tracker", page_icon="📊", layout="wide")
 st.title("📊 SPY Iron Condor Tracker")
-st.caption("Technical analysis for optimal iron condor windows using Bollinger Bands, RSI, and ATR")
+st.caption("Technical analysis for optimal neutral iron condor windows using Bollinger Bands, RSI, and ATR")
 
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
 TICKER = "SPY"
-LOOKBACK_DAYS = 30
+LOOKBACK_DAYS = 60
 PERIOD_SHORT = 14
 PERIOD_LONG = 50
 
-# Iron Condor Parameters
+# Strike & Delta Configuration
+DELTA_ATR_MULTIPLIER = 2.0  # Target Delta: ~16 Delta / 1 SD
+WING_WIDTH = 2.0            # Defined-risk spread width in dollars
+
+# Iron Condor Parameters (Updated for Neutral Logic)
 IC_SETUP = {
-    "rsi_sell_threshold": 70,      # Upper RSI for Put Spread
-    "rsi_buy_threshold": 30,       # Lower RSI for Call Spread
-    "atr_multiplier": 1.5,         # For breakout width
-    "bb_threshold": 2.0,           # Standard deviations for Bollinger Bands
-    "volatility_min": 0.01,        # Minimum IV percentile
-    "volatility_max": 0.85,        # Maximum IV percentile (avoid too volatile)
+    "volatility_min": 0.20,        # Minimum IV Rank (20%)
+    "volatility_max": 0.85,        # Maximum IV Rank
+    "min_score": 70.0,             # Minimum score to trigger setup
 }
 
 # ---------------------------------------------------------
@@ -76,14 +76,14 @@ def calculate_indicators(df):
     return df_calc
 
 def identify_ic_setup(df):
-    """Identify ideal iron condor setup windows"""
+    """Identify ideal neutral iron condor setup windows"""
     df = df.copy()
-    df['IC_Signal'] = 0  # 0=No Setup, 1=Call Spread, -1=Put Spread
+    df['IC_Signal'] = 0  # 0=No Setup, 1=Call Spread, -1=Put Spread, 2=Neutral IC
     df['IC_Score'] = 0.0
     
     latest = df.iloc[-1]
     
-    # Get RSI
+    # Get values
     rsi = latest.get('RSI', np.nan)
     close_price = latest['close']
     atr = latest.get('ATR', 0)
@@ -94,18 +94,17 @@ def identify_ic_setup(df):
     vol_max = df['Volatility'].max()
     iv_rank = (volatility - vol_min) / (vol_max - vol_min) if vol_max > vol_min else 0.5
     
-    # Scoring system for iron condor setup
     score = 0.0
     reasons = []
     
-    # Volatility is moderate (ideal for iron condor - not too high, not too low)
+    # 1. Volatility is elevated for premium (30 points)
     if IC_SETUP['volatility_min'] <= iv_rank <= IC_SETUP['volatility_max']:
         score += 30
-        reasons.append("✓ Volatility in ideal range")
+        reasons.append(f"✓ Volatility elevated for premium collection (IVR: {iv_rank:.1%})")
     else:
-        reasons.append(f"✗ Volatility outside range (IV Rank: {iv_rank:.2%})")
+        reasons.append(f"✗ Volatility too low/high (IV Rank: {iv_rank:.1%})")
     
-    # Check if price is near middle bands (mean reversion setup)
+    # 2. Bollinger Bands Mean Reversion (25 points)
     bb_cols = [c for c in df.columns if 'BBL' in c or 'BBU' in c or 'BBM' in c]
     if bb_cols:
         bb_upper = df[[c for c in df.columns if 'BBU' in c][0]].iloc[-1] if any('BBU' in c for c in df.columns) else close_price + atr
@@ -117,54 +116,72 @@ def identify_ic_setup(df):
         
         if bb_range > 0 and distance_to_mid < bb_range * 0.25:
             score += 25
-            reasons.append("✓ Price near middle bands (mean reversion)")
-    
-    # PUT SPREAD conditions: High RSI (potential pullback)
-    if not np.isnan(rsi):
-        if rsi > IC_SETUP['rsi_sell_threshold']:
-            score += 25
-            df.loc[df.index[-1], 'IC_Signal'] = -1  # Put Spread
-            reasons.append(f"✓ High RSI ({rsi:.1f}) - Put Spread candidate")
-        elif rsi < IC_SETUP['rsi_buy_threshold']:
-            score += 25
-            df.loc[df.index[-1], 'IC_Signal'] = 1  # Call Spread
-            reasons.append(f"✓ Low RSI ({rsi:.1f}) - Call Spread candidate")
+            reasons.append("✓ Price near middle of Bollinger Bands (Range-bound)")
         else:
-            reasons.append(f"⚪ RSI neutral ({rsi:.1f})")
+            reasons.append("✗ Price too close to BB edges (Trending)")
+            
+    # 3. RSI Neutrality Check (25 points)
+    if not np.isnan(rsi):
+        if 40 <= rsi <= 60:
+            score += 25
+            reasons.append(f"✓ RSI is neutral ({rsi:.1f})")
+        elif rsi > 70:
+            reasons.append(f"✗ RSI overbought ({rsi:.1f}) - Potential Put Spread instead")
+            df.loc[df.index[-1], 'IC_Signal'] = -1 
+        elif rsi < 30:
+            reasons.append(f"✗ RSI oversold ({rsi:.1f}) - Potential Call Spread instead")
+            df.loc[df.index[-1], 'IC_Signal'] = 1
+        else:
+            reasons.append(f"✗ RSI indicates mild trend/momentum ({rsi:.1f})")
     
-    # ATR check: Moderate but not extreme volatility
+    # 4. ATR Normalization Check (20 points)
     atr_sma = df['ATR'].rolling(window=10).mean().iloc[-1]
     if atr_sma > 0:
         atr_ratio = atr / atr_sma
         if 0.8 <= atr_ratio <= 1.2:
             score += 20
-            reasons.append("✓ ATR normalized (stable volatility)")
+            reasons.append("✓ Volatility (ATR) is stable")
         else:
-            reasons.append(f"⚠ ATR elevated ({atr_ratio:.2f}x avg)")
+            reasons.append(f"✗ Volatility (ATR) is expanding/contracting too fast ({atr_ratio:.2f}x avg)")
     
     df.loc[df.index[-1], 'IC_Score'] = score
+    
+    # Set main signal if score is met
+    if score >= IC_SETUP['min_score']:
+        df.loc[df.index[-1], 'IC_Signal'] = 2
     
     return df, reasons, score, rsi, iv_rank
 
 def calculate_ic_levels(close_price, atr, signal):
-    """Calculate iron condor strike levels"""
-    levels = {}
-    
-    # Using ATR for strikes
-    strike_width = atr * IC_SETUP['atr_multiplier']
-    
-    if signal == 1:  # Call Spread (Bullish)
-        levels['short_call'] = close_price + strike_width
-        levels['long_call'] = close_price + (strike_width * 2)
-        levels['short_put'] = close_price - (strike_width * 0.5)
-        levels['long_put'] = close_price - (strike_width * 1.5)
-    elif signal == -1:  # Put Spread (Bearish)
-        levels['short_put'] = close_price - strike_width
-        levels['long_put'] = close_price - (strike_width * 2)
-        levels['short_call'] = close_price + (strike_width * 0.5)
-        levels['long_call'] = close_price + (strike_width * 1.5)
-    
-    return levels
+    """Calculate tradeable, rounded Iron Condor strike levels"""
+    short_distance = atr * DELTA_ATR_MULTIPLIER
+
+    # Asymmetric skewing based on trend signal
+    if signal == 1:
+        call_buffer = short_distance * 1.2
+        put_buffer = short_distance * 0.8
+    elif signal == -1:
+        call_buffer = short_distance * 0.8
+        put_buffer = short_distance * 1.2
+    else:
+        call_buffer = short_distance
+        put_buffer = short_distance
+
+    short_call = round(close_price + call_buffer)
+    long_call = round(short_call + WING_WIDTH)
+
+    short_put = round(close_price - put_buffer)
+    long_put = round(short_put - WING_WIDTH)
+
+    return {
+        "short_call": short_call,
+        "long_call": long_call,
+        "short_put": short_put,
+        "long_put": long_put,
+        "wing_width": WING_WIDTH,
+        "max_profit_range_low": short_put,
+        "max_profit_range_high": short_call,
+    }
 
 # ---------------------------------------------------------
 # Main App Logic
@@ -205,20 +222,23 @@ st.divider()
 col_signal, col_levels = st.columns(2)
 
 with col_signal:
-    st.subheader("🎯 Iron Condor Setup")
+    st.subheader("🎯 Setup Analysis")
     st.metric("Setup Score", f"{score:.0f}/100")
     
-    if signal == 1:
-        st.success("🟢 CALL SPREAD CANDIDATE")
-        st.write("**Setup**: Price near support, low RSI, volatility normalized")
+    if signal == 2:
+        st.success("🦅 NEUTRAL IRON CONDOR CANDIDATE")
+        st.write("**Setup**: Range-bound price action, neutral RSI, and elevated volatility.")
+    elif signal == 1:
+        st.info("🟢 CALL SPREAD CANDIDATE (Skewed)")
+        st.write("**Setup**: Price oversold. Directional skew suggested.")
     elif signal == -1:
-        st.error("🔴 PUT SPREAD CANDIDATE")
-        st.write("**Setup**: Price near resistance, high RSI, volatility normalized")
+        st.warning("🔴 PUT SPREAD CANDIDATE (Skewed)")
+        st.write("**Setup**: Price overbought. Directional skew suggested.")
     else:
         st.info("⚪ NO CLEAR SETUP")
-        st.write("**Wait for**: RSI extreme or mean reversion signal")
+        st.write("**Wait for**: Range-bound consolidation and stable volatility.")
     
-    st.markdown("### Setup Conditions:")
+    st.markdown("### Conditions Matrix:")
     for reason in reasons:
         st.write(reason)
 
@@ -229,22 +249,18 @@ with col_levels:
         level_data = {
             "Strike Type": ["Short Call", "Long Call", "Short Put", "Long Put"],
             "Price": [
-                ic_levels.get('short_call', 0),
-                ic_levels.get('long_call', 0),
-                ic_levels.get('short_put', 0),
-                ic_levels.get('long_put', 0)
+                f"${ic_levels.get('short_call'):.2f}",
+                f"${ic_levels.get('long_call'):.2f}",
+                f"${ic_levels.get('short_put'):.2f}",
+                f"${ic_levels.get('long_put'):.2f}"
             ]
         }
         level_df = pd.DataFrame(level_data)
         st.dataframe(level_df, use_container_width=True, hide_index=True)
         
-        # Max profit width
-        call_width = ic_levels.get('short_call', 0) - ic_levels.get('long_call', 0)
-        put_width = ic_levels.get('short_put', 0) - ic_levels.get('long_put', 0)
-        max_width = max(abs(call_width), abs(put_width))
-        
-        st.write(f"**Max Profit Width**: ${max_width:.2f}")
-        st.write(f"**Max Profit Region**: ${ic_levels.get('long_put', 0):.2f} - ${ic_levels.get('long_call', 0):.2f}")
+        st.write(f"**Max Profit Width (Wings)**: ${ic_levels['wing_width']:.2f}")
+        st.write(f"**Collateral Required**: ${ic_levels['wing_width'] * 100:.2f} per contract")
+        st.write(f"**Max Profit Region**: ${ic_levels['max_profit_range_low']:.2f} to ${ic_levels['max_profit_range_high']:.2f}")
 
 st.divider()
 
@@ -268,7 +284,6 @@ fig.add_trace(go.Scatter(
 # Bollinger Bands
 bb_upper_col = [c for c in df.columns if 'BBU' in c][0] if any('BBU' in c for c in df.columns) else None
 bb_lower_col = [c for c in df.columns if 'BBL' in c][0] if any('BBL' in c for c in df.columns) else None
-bb_mid_col = [c for c in df.columns if 'BBM' in c][0] if any('BBM' in c for c in df.columns) else None
 
 if bb_upper_col:
     fig.add_trace(go.Scatter(
@@ -337,13 +352,20 @@ with col_rsi:
         mode='lines',
         name='RSI',
         line=dict(color='#9467bd', width=2),
-        fill='tozeroy',
-        fillcolor='rgba(148, 103, 189, 0.3)'
     ))
+    
+    # Add Neutral Zone shading
+    fig_rsi.add_hrect(
+        y0=40, y1=60, 
+        line_width=0, 
+        fillcolor="rgba(0, 255, 0, 0.15)", 
+        annotation_text="Neutral Strategy Zone", 
+        annotation_position="top left"
+    )
     
     # Add overbought/oversold lines
     fig_rsi.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
-    fig_rsi.add_hline(y=30, line_dash="dash", line_color="green", annotation_text="Oversold")
+    fig_rsi.add_hline(y=30, line_dash="dash", line_color="red", annotation_text="Oversold")
     fig_rsi.add_hline(y=50, line_dash="dot", line_color="gray")
     
     fig_rsi.update_layout(
@@ -358,24 +380,32 @@ with col_rsi:
     st.plotly_chart(fig_rsi, use_container_width=True)
 
 with col_vol:
-    st.subheader("Volatility Trend")
+    st.subheader("Volatility Trend (IV Rank Proxy)")
     fig_vol = go.Figure()
+    
+    # Normalize volatility for display purposes to match the IV Rank math
+    vol_min = df['Volatility'].min()
+    vol_max = df['Volatility'].max()
+    historical_iv_rank = (df['Volatility'] - vol_min) / (vol_max - vol_min) * 100
     
     fig_vol.add_trace(go.Scatter(
         x=df.index,
-        y=df['Volatility'] * 100,
+        y=historical_iv_rank,
         mode='lines',
-        name='IV (%)',
+        name='IV Rank (%)',
         line=dict(color='#d62728', width=2),
         fill='tozeroy',
         fillcolor='rgba(214, 39, 40, 0.3)'
     ))
     
+    # Add the 20% floor line
+    fig_vol.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="Minimum Premium Floor (20%)")
+    
     fig_vol.update_layout(
         height=300,
         template='plotly_dark',
         xaxis_title='Date',
-        yaxis_title='Volatility (%)',
+        yaxis_title='IV Rank (%)',
         hovermode='x',
         margin=dict(l=10, r=10, t=40, b=10)
     )
@@ -385,37 +415,26 @@ with col_vol:
 st.divider()
 
 # ---------------------------------------------------------
-# Data Table
-# ---------------------------------------------------------
-st.subheader("📊 Historical Data")
-display_cols = ['close', 'RSI', 'ATR', 'Volatility', 'SMA_14', 'SMA_50']
-display_df = df[display_cols].tail(20).copy()
-display_df.columns = ['Close', 'RSI', 'ATR', 'Volatility', 'SMA 14', 'SMA 50']
-display_df = display_df.round(2)
-
-st.dataframe(display_df, use_container_width=True)
-
-# ---------------------------------------------------------
 # Configuration Info
 # ---------------------------------------------------------
 with st.expander("⚙️ Configuration & Strategy"):
     st.write("""
-    ### Iron Condor Setup Strategy
+    ### True Neutral Iron Condor Strategy
     
     **When to Trade:**
-    - RSI > 70: Put Spread candidate (potential pullback from resistance)
-    - RSI < 30: Call Spread candidate (potential bounce from support)
-    - IV Rank 15%-85%: Optimal premium selling range
+    - **Range-Bound Action:** Price must be hovering near the 20-day Bollinger Band midline, signifying the absence of a strong trend.
+    - **Neutral Momentum:** RSI must sit squarely in the 40-60 zone. Extreme momentum (>70 or <30) suggests entering a skewed, directional spread instead.
+    - **Elevated Volatility (IV Rank > 20%):** Iron Condors are short-premium strategies. Volatility must be elevated to ensure the collateral-to-premium ratio is worth the risk.
+    - **Stable Volatility (ATR Check):** While elevated, the volatility should be stable (ATR within 20% of its 10-day average), avoiding erratic blowout moves.
     
     **Strike Selection:**
-    - Short strikes at ±1.0 ATR from current price
-    - Long protection at ±2.0 ATR from current price
-    - Creates defined risk with ~25% max profit window
+    - **Short strikes:** Placed symmetrically at ~2.0x ATR from the current price (targeting ~16 Delta / 1 Standard Deviation).
+    - **Long wings:** Placed $2.00 further out to cap maximum loss and define buying power reduction.
     
     **Risk Management:**
-    - Position size based on account risk (1-2%)
-    - Exit at 50% max profit
-    - Stop loss if price breaks long strike
+    - Enter around 30-45 DTE (Days to Expiration).
+    - Exit strategy: Close at 50% max profit.
+    - Stop loss: Typically if the underlying breaches the short strike of either wing.
     """)
     
     st.json(IC_SETUP)
