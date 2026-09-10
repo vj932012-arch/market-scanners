@@ -1,10 +1,7 @@
 name: Iron Condor Bot Alerts
 
 on:
-  schedule:
-    # Run every 15 minutes during market hours (9:30 AM - 4:00 PM ET)
-    - cron: '*/15 14-20 * * 1-5'  # 9:30 AM - 4:00 PM ET (14:00 - 20:00 UTC), Mon-Fri
-  
+
   workflow_dispatch:  # Manual trigger
 
 jobs:
