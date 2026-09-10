@@ -27,10 +27,7 @@ WING_WIDTH = 2.0            # Defined-risk spread width in dollars
 
 # Setup Parameters
 IC_SETUP = {
-    "rsi_sell_threshold": 70,      
-    "rsi_buy_threshold": 30,       
-    "bb_threshold": 2.0,
-    "volatility_min": 0.01,
+    "volatility_min": 0.20,     # Re-adjusted to 20% floor
     "volatility_max": 0.85,
     "min_score": 70.0,             
 }
@@ -148,8 +145,8 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def identify_ic_setup(df: pd.DataFrame) -> Tuple[int, float, Dict]:
     """
-    Identify setup
-    signal: 1=Call Spread, -1=Put Spread, 0=No Setup
+    Identify neutral Iron Condor setup.
+    signal: 2 = Neutral Iron Condor, 0 = No Setup
     """
     details = {
         "reasons": [],
@@ -173,20 +170,20 @@ def identify_ic_setup(df: pd.DataFrame) -> Tuple[int, float, Dict]:
     details['rsi'] = rsi
     details['atr'] = atr
 
-    # IV Rank
+    # IV Rank Proxy
     vol_min = df['Volatility'].min()
     vol_max = df['Volatility'].max()
     iv_rank = (volatility - vol_min) / (vol_max - vol_min) if vol_max > vol_min else 0.5
     details['iv_rank'] = iv_rank
 
-    # Volatility check
-    if IC_SETUP['volatility_min'] <= iv_rank <= IC_SETUP['volatility_max']:
+    # 1. Volatility Check (30 points)
+    if 0.20 <= iv_rank <= IC_SETUP['volatility_max']:
         score += 30
-        details['reasons'].append("✓ Volatility in ideal range")
+        details['reasons'].append(f"✓ Volatility elevated for premium collection (IVR: {iv_rank:.1%})")
     else:
-        details['reasons'].append("✗ Volatility outside range")
+        details['reasons'].append(f"✗ Volatility too low/high (IVR: {iv_rank:.1%})")
 
-    # Bollinger Bands position
+    # 2. Bollinger Bands Check (25 points)
     bb_upper_col = [c for c in df.columns if 'BBU' in c]
     bb_lower_col = [c for c in df.columns if 'BBL' in c]
 
@@ -194,32 +191,35 @@ def identify_ic_setup(df: pd.DataFrame) -> Tuple[int, float, Dict]:
         bb_upper = df[bb_upper_col[0]].iloc[-1]
         bb_lower = df[bb_lower_col[0]].iloc[-1]
         bb_mid = (bb_upper + bb_lower) / 2
-
-        distance_to_mid = abs(close_price - bb_mid)
         bb_range = bb_upper - bb_lower
+        distance_to_mid = abs(close_price - bb_mid)
 
         if bb_range > 0 and distance_to_mid < bb_range * 0.25:
             score += 25
-            details['reasons'].append("✓ Price near middle bands")
+            details['reasons'].append("✓ Price near middle of Bollinger Bands (Range-bound)")
+        else:
+            details['reasons'].append("✗ Price too close to BB edges (Trending)")
 
-    # RSI extremes
+    # 3. RSI Neutrality Check (25 points)
     if not np.isnan(rsi):
-        if rsi > IC_SETUP['rsi_sell_threshold']:
+        if 40 <= rsi <= 60:
             score += 25
-            signal = -1
-            details['reasons'].append(f"✓ High RSI {rsi:.1f} - Put Spread")
-        elif rsi < IC_SETUP['rsi_buy_threshold']:
-            score += 25
-            signal = 1
-            details['reasons'].append(f"✓ Low RSI {rsi:.1f} - Call Spread")
+            details['reasons'].append(f"✓ RSI is neutral ({rsi:.1f})")
+        else:
+            details['reasons'].append(f"✗ RSI indicates trend/momentum ({rsi:.1f})")
 
-    # ATR normalization
+    # 4. ATR Normalization Check (20 points)
     atr_sma = df['ATR'].rolling(window=10).mean().iloc[-1]
     if atr_sma > 0:
         atr_ratio = atr / atr_sma
         if 0.8 <= atr_ratio <= 1.2:
             score += 20
-            details['reasons'].append("✓ ATR normalized")
+            details['reasons'].append("✓ Volatility (ATR) is stable")
+        else:
+            details['reasons'].append("✗ Volatility (ATR) is expanding/contracting too fast")
+
+    if score >= IC_SETUP.get('min_score', 70.0):
+        signal = 2 
 
     return signal, score, details
 
@@ -257,7 +257,15 @@ def calculate_ic_levels(close_price: float, atr: float, signal: int = 0) -> Dict
 def format_alert_message(signal: int, score: float, details: Dict, levels: Dict) -> str:
     """Format active alert message for Telegram"""
     now_et = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S ET')
-    signal_type = "🟢 CALL SPREAD" if signal == 1 else "🔴 PUT SPREAD"
+    
+    if signal == 2:
+        signal_type = "🦅 NEUTRAL IRON CONDOR"
+    elif signal == 1:
+        signal_type = "🟢 CALL SPREAD"
+    elif signal == -1:
+        signal_type = "🔴 PUT SPREAD"
+    else:
+        signal_type = "⚪ UNKNOWN SIGNAL"
 
     message = f"""<b>{signal_type} SIGNAL - Setup Score: {score:.0f}/100</b>
 
