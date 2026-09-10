@@ -1,35 +1,30 @@
-name: Iron Condor Bot Alerts
+name: Iron Condor Scanner Bot
 
 on:
-  workflow_dispatch:  # Manual trigger
+  # Allow manual runs from the GitHub Actions tab
+  workflow_dispatch:
 
 jobs:
-  iron-condor-scan:
+  run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.10'
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests pandas numpy pandas-ta pytz
 
-      - name: Run Iron Condor Analysis
+      - name: Run Iron Condor Bot
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: python iron_condor_bot.py
-
-      - name: Log Analysis Result
-        if: always()
-        run: |
-          echo "✓ Iron Condor scan completed at $(date)"
