@@ -1,440 +1,199 @@
-import streamlit as st
-import yfinance as yf
+import datetime
+import numpy as np
 import pandas as pd
 import pandas_ta as ta
 import plotly.graph_objects as go
-import numpy as np
-from datetime import datetime, timedelta
+from plotly.subplots import make_subplots
+import streamlit as st
+import yfinance as yf
 
 # ---------------------------------------------------------
-# Page Configuration
+# Page Configuration & Styling
 # ---------------------------------------------------------
-st.set_page_config(page_title="Iron Condor Tracker", page_icon="📊", layout="wide")
-st.title("📊 SPY Iron Condor Tracker")
-st.caption("Technical analysis for optimal neutral iron condor windows using Bollinger Bands, RSI, and ATR")
+st.set_page_config(
+    page_title="7-DTE Iron Condor Tracker", page_icon="🦅", layout="wide"
+)
+
+st.markdown(
+    """
+    <style>
+    .metric-card { border: 1px solid #30363d; border-radius: 8px; padding: 15px; background-color: rgba(255, 255, 255, 0.03); margin-bottom: 10px; }
+    .banner-green { background-color: rgba(0, 230, 118, 0.15); border-left: 6px solid #00e676; padding: 15px 20px; border-radius: 6px; color: #00e676; font-weight: 700; font-size: 1.2rem; margin-bottom: 10px; }
+    .banner-yellow { background-color: rgba(255, 235, 59, 0.15); border-left: 6px solid #ffeb3b; padding: 15px 20px; border-radius: 6px; color: #ffeb3b; font-weight: 700; font-size: 1.2rem; margin-bottom: 10px; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------
-# Configuration
+# Market Data & Indicator Logic
 # ---------------------------------------------------------
-TICKER = "SPY"
-LOOKBACK_DAYS = 60
-PERIOD_SHORT = 14
-PERIOD_LONG = 50
+@st.cache_data(ttl=900)
+def fetch_daily_data(ticker_symbol: str, lookback_days: int = 180):
+    """Fetches daily historical data for swing trade indicators."""
+    ticker = yf.Ticker(ticker_symbol)
+    df = ticker.history(period=f"{lookback_days}d", interval="1d")
 
-# Strike & Delta Configuration
-DELTA_ATR_MULTIPLIER = 2.0  # Target Delta: ~16 Delta / 1 SD
-WING_WIDTH = 2.0            # Defined-risk spread width in dollars
+    if df.empty:
+        return pd.DataFrame()
 
-# Iron Condor Parameters (Updated for Neutral Logic)
-IC_SETUP = {
-    "volatility_min": 0.20,        # Minimum IV Rank (20%)
-    "volatility_max": 0.85,        # Maximum IV Rank
-    "min_score": 70.0,             # Minimum score to trigger setup
-}
-
-# ---------------------------------------------------------
-# Data Fetching & Analysis
-# ---------------------------------------------------------
-@st.cache_data(ttl=300)
-def fetch_spy_data(ticker=TICKER, days=LOOKBACK_DAYS):
-    """Fetch historical SPY data"""
-    df = yf.download(ticker, period=f"{days}d", progress=False)
-    
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
     df.columns = [c.lower() for c in df.columns]
     
+    # Drop rows with NaN close prices
+    df = df.dropna(subset=['close'])
     return df
 
-def calculate_indicators(df):
-    """Calculate technical indicators for iron condor setup"""
-    df_calc = df.copy()
-    
-    # RSI (Relative Strength Index)
-    df_calc['RSI'] = ta.rsi(df_calc['close'], length=PERIOD_SHORT)
-    
-    # Bollinger Bands
-    bb = ta.bbands(df_calc['close'], length=20, std=2)
-    if bb is not None:
-        df_calc = pd.concat([df_calc, bb], axis=1)
-    
-    # ATR (Average True Range) for volatility
-    df_calc['ATR'] = ta.atr(df_calc['high'], df_calc['low'], df_calc['close'], length=14)
-    
-    # SMA for trend
-    df_calc['SMA_14'] = ta.sma(df_calc['close'], length=PERIOD_SHORT)
-    df_calc['SMA_50'] = ta.sma(df_calc['close'], length=PERIOD_LONG)
-    
-    # MACD for momentum
-    macd = ta.macd(df_calc['close'], fast=12, slow=26, signal=9)
-    if macd is not None:
-        df_calc = pd.concat([df_calc, macd], axis=1)
-    
-    # Volatility (Standard Deviation of returns)
-    df_calc['Volatility'] = df_calc['close'].pct_change().rolling(window=20).std() * np.sqrt(252)
-    
-    return df_calc
-
-def identify_ic_setup(df):
-    """Identify ideal neutral iron condor setup windows"""
+def generate_ic_signals(df: pd.DataFrame, vol_min: float, vol_max: float) -> pd.DataFrame:
+    """Calculates indicators and identifies neutral 7-DTE setups."""
     df = df.copy()
-    df['IC_Signal'] = 0  # 0=No Setup, 1=Call Spread, -1=Put Spread, 2=Neutral IC
-    df['IC_Score'] = 0.0
-    
-    latest = df.iloc[-1]
-    
-    # Get values
-    rsi = latest.get('RSI', np.nan)
-    close_price = latest['close']
-    atr = latest.get('ATR', 0)
-    volatility = latest.get('Volatility', 0)
-    
-    # Calculate IV Rank (normalized volatility)
-    vol_min = df['Volatility'].min()
-    vol_max = df['Volatility'].max()
-    iv_rank = (volatility - vol_min) / (vol_max - vol_min) if vol_max > vol_min else 0.5
-    
-    score = 0.0
-    reasons = []
-    
-    # 1. Volatility is elevated for premium (30 points)
-    if IC_SETUP['volatility_min'] <= iv_rank <= IC_SETUP['volatility_max']:
-        score += 30
-        reasons.append(f"✓ Volatility elevated for premium collection (IVR: {iv_rank:.1%})")
-    else:
-        reasons.append(f"✗ Volatility too low/high (IV Rank: {iv_rank:.1%})")
-    
-    # 2. Bollinger Bands Mean Reversion (25 points)
-    bb_cols = [c for c in df.columns if 'BBL' in c or 'BBU' in c or 'BBM' in c]
-    if bb_cols:
-        bb_upper = df[[c for c in df.columns if 'BBU' in c][0]].iloc[-1] if any('BBU' in c for c in df.columns) else close_price + atr
-        bb_lower = df[[c for c in df.columns if 'BBL' in c][0]].iloc[-1] if any('BBL' in c for c in df.columns) else close_price - atr
-        bb_mid = (bb_upper + bb_lower) / 2
+
+    # RSI & ATR
+    df["rsi"] = ta.rsi(df["close"], length=14)
+    df["atr"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+
+    # Bollinger Bands (20, 2)
+    bb = ta.bbands(df["close"], length=20, std=2)
+    if bb is not None:
+        df = pd.concat([df, bb], axis=1)
+
+    # Volatility & IV Rank Proxy
+    df["volatility"] = df["close"].pct_change().rolling(window=20).std() * np.sqrt(252)
+    vol_min_historical = df["volatility"].rolling(window=90).min()
+    vol_max_historical = df["volatility"].rolling(window=90).max()
+    df["iv_rank"] = (df["volatility"] - vol_min_historical) / (vol_max_historical - vol_min_historical)
+
+    # Signal Generation (Neutral Setup)
+    df["signal"] = 0
+    df["score"] = 0
+
+    for i in range(len(df)):
+        score = 0
         
-        distance_to_mid = abs(close_price - bb_mid)
-        bb_range = bb_upper - bb_lower
-        
-        if bb_range > 0 and distance_to_mid < bb_range * 0.25:
-            score += 25
-            reasons.append("✓ Price near middle of Bollinger Bands (Range-bound)")
-        else:
-            reasons.append("✗ Price too close to BB edges (Trending)")
+        # 1. Volatility check
+        if pd.notna(df["iv_rank"].iloc[i]) and vol_min <= df["iv_rank"].iloc[i] <= vol_max:
+            score += 30
             
-    # 3. RSI Neutrality Check (25 points)
-    if not np.isnan(rsi):
-        if 40 <= rsi <= 60:
+        # 2. RSI Neutral check (40-60)
+        if pd.notna(df["rsi"].iloc[i]) and 40 <= df["rsi"].iloc[i] <= 60:
             score += 25
-            reasons.append(f"✓ RSI is neutral ({rsi:.1f})")
-        elif rsi > 70:
-            reasons.append(f"✗ RSI overbought ({rsi:.1f}) - Potential Put Spread instead")
-            df.loc[df.index[-1], 'IC_Signal'] = -1 
-        elif rsi < 30:
-            reasons.append(f"✗ RSI oversold ({rsi:.1f}) - Potential Call Spread instead")
-            df.loc[df.index[-1], 'IC_Signal'] = 1
-        else:
-            reasons.append(f"✗ RSI indicates mild trend/momentum ({rsi:.1f})")
+            
+        # 3. Bollinger Bands Mean Reversion check
+        bbu_col = [c for c in df.columns if 'BBU' in c]
+        bbl_col = [c for c in df.columns if 'BBL' in c]
+        if bbu_col and bbl_col and pd.notna(df[bbu_col[0]].iloc[i]):
+            bb_upper = df[bbu_col[0]].iloc[i]
+            bb_lower = df[bbl_col[0]].iloc[i]
+            bb_mid = (bb_upper + bb_lower) / 2
+            bb_range = bb_upper - bb_lower
+            if bb_range > 0 and abs(df["close"].iloc[i] - bb_mid) < (bb_range * 0.25):
+                score += 25
+                
+        # 4. ATR Stability check
+        if i >= 10:
+            atr_sma = df["atr"].iloc[i-10:i].mean()
+            if atr_sma > 0 and 0.8 <= (df["atr"].iloc[i] / atr_sma) <= 1.2:
+                score += 20
+                
+        df.iloc[i, df.columns.get_loc("score")] = score
+        if score >= 70:
+            df.iloc[i, df.columns.get_loc("signal")] = 2
+
+    return df
+
+def calculate_7_dte_strikes(price: float, atr: float, delta_multiplier: float, wing_width: float):
+    """Calculates whole-dollar strikes based on a 7-day expected move."""
+    # Scale 1-day ATR to 5 trading days (7 calendar days)
+    expected_7_day_move = atr * np.sqrt(5)
+    short_distance = expected_7_day_move * delta_multiplier
+
+    # Round inner strikes to nearest dollar for liquidity
+    short_call = np.ceil(price + short_distance)
+    short_put = np.floor(price - short_distance)
     
-    # 4. ATR Normalization Check (20 points)
-    atr_sma = df['ATR'].rolling(window=10).mean().iloc[-1]
-    if atr_sma > 0:
-        atr_ratio = atr / atr_sma
-        if 0.8 <= atr_ratio <= 1.2:
-            score += 20
-            reasons.append("✓ Volatility (ATR) is stable")
-        else:
-            reasons.append(f"✗ Volatility (ATR) is expanding/contracting too fast ({atr_ratio:.2f}x avg)")
+    # Fixed wing width for defined collateral
+    long_call = short_call + wing_width
+    long_put = short_put - wing_width
     
-    df.loc[df.index[-1], 'IC_Score'] = score
-    
-    # Set main signal if score is met
-    if score >= IC_SETUP['min_score']:
-        df.loc[df.index[-1], 'IC_Signal'] = 2
-    
-    return df, reasons, score, rsi, iv_rank
-
-def calculate_ic_levels(close_price, atr, signal):
-    """Calculate tradeable, rounded Iron Condor strike levels"""
-    short_distance = atr * DELTA_ATR_MULTIPLIER
-
-    # Asymmetric skewing based on trend signal
-    if signal == 1:
-        call_buffer = short_distance * 1.2
-        put_buffer = short_distance * 0.8
-    elif signal == -1:
-        call_buffer = short_distance * 0.8
-        put_buffer = short_distance * 1.2
-    else:
-        call_buffer = short_distance
-        put_buffer = short_distance
-
-    short_call = round(close_price + call_buffer)
-    long_call = round(short_call + WING_WIDTH)
-
-    short_put = round(close_price - put_buffer)
-    long_put = round(short_put - WING_WIDTH)
-
-    return {
-        "short_call": short_call,
-        "long_call": long_call,
-        "short_put": short_put,
-        "long_put": long_put,
-        "wing_width": WING_WIDTH,
-        "max_profit_range_low": short_put,
-        "max_profit_range_high": short_call,
-    }
+    return short_call, long_call, short_put, long_put
 
 # ---------------------------------------------------------
-# Main App Logic
+# Main UI
 # ---------------------------------------------------------
-# Fetch and analyze data
-df = fetch_spy_data()
-df = calculate_indicators(df)
-df, reasons, score, rsi, iv_rank = identify_ic_setup(df)
+st.title("🦅 7-DTE Iron Condor Tracker")
+st.caption("Scans daily market data for neutral setups to harvest accelerating short-term Theta decay.")
 
-# Get latest values
-latest = df.iloc[-1]
-close_price = latest['close']
-atr = latest['ATR']
-signal = int(latest['IC_Signal'])
-sma_14 = latest['SMA_14']
-sma_50 = latest['SMA_50']
+st.sidebar.header("⚙️ Strategy Parameters")
+ticker = st.sidebar.text_input("Ticker Symbol", "SPY").upper()
+delta_mult = st.sidebar.slider("Delta (ATR) Multiplier", 1.0, 3.0, 1.5, step=0.1)
+wing_width = st.sidebar.selectbox("Wing Width ($)", [1.0, 2.0, 3.0, 5.0], index=1)
+vol_min = st.sidebar.slider("Min IV Rank", 0.0, 0.5, 0.20, step=0.05)
+vol_max = st.sidebar.slider("Max IV Rank", 0.5, 1.0, 0.85, step=0.05)
 
-# Calculate IC levels
-ic_levels = calculate_ic_levels(close_price, atr, signal)
+if st.sidebar.button("🔄 Force Refresh"):
+    st.cache_data.clear()
+    st.rerun()
+
+raw_df = fetch_daily_data(ticker)
+if raw_df.empty:
+    st.error("Failed to fetch market data.")
+    st.stop()
+
+proc_df = generate_ic_signals(raw_df, vol_min, vol_max)
+latest = proc_df.iloc[-1]
+
+target_exp = (datetime.datetime.now() + datetime.timedelta(days=7)).strftime('%b %d, %Y')
 
 # ---------------------------------------------------------
-# Display Results
+# Dynamic Banner & Strikes
+# ---------------------------------------------------------
+if latest["signal"] == 2:
+    st.markdown(f'<div class="banner-green">🦅 {ticker} @ ${latest["close"]:.2f} — NEUTRAL SETUP TRIGGERED (Score: {latest["score"]:.0f}/100)</div>', unsafe_allow_html=True)
+    
+    short_c, long_c, short_p, long_p = calculate_7_dte_strikes(latest["close"], latest["atr"], delta_mult, wing_width)
+    
+    st.markdown(f"### 📋 {ticker} Suggested 7-DTE Structure")
+    st.markdown(f"**Target Expiration:** {target_exp}")
+    
+    c1, c2, c3 = st.columns(3)
+    c1.info(f"**Call Side (Credit):**\nSell ${short_c:.0f}C / Buy ${long_c:.0f}C")
+    c2.info(f"**Put Side (Credit):**\nSell ${short_p:.0f}P / Buy ${long_p:.0f}P")
+    c3.success(f"**Max Profit Zone:**\n${short_p:.0f} to ${short_c:.0f}\n\n**Collateral:** ${wing_width*100:.0f}")
+else:
+    st.markdown(f'<div class="banner-yellow">⚪ {ticker} @ ${latest["close"]:.2f} — MONITORING (Score: {latest["score"]:.0f}/100)</div>', unsafe_allow_html=True)
+    st.write(f"Waiting for neutral trend confirmation. Requires IV Rank > {vol_min}, RSI between 40-60, and stable ATR.")
+
+st.markdown("---")
+
+# ---------------------------------------------------------
+# Metric Cards
 # ---------------------------------------------------------
 col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric("SPY Price", f"${close_price:.2f}")
-with col2:
-    st.metric("RSI (14)", f"{rsi:.1f}")
-with col3:
-    st.metric("ATR (14)", f"${atr:.2f}")
-with col4:
-    st.metric("IV Rank", f"{iv_rank:.1%}")
-
-st.divider()
-
-# Signal and Recommendations
-col_signal, col_levels = st.columns(2)
-
-with col_signal:
-    st.subheader("🎯 Setup Analysis")
-    st.metric("Setup Score", f"{score:.0f}/100")
-    
-    if signal == 2:
-        st.success("🦅 NEUTRAL IRON CONDOR CANDIDATE")
-        st.write("**Setup**: Range-bound price action, neutral RSI, and elevated volatility.")
-    elif signal == 1:
-        st.info("🟢 CALL SPREAD CANDIDATE (Skewed)")
-        st.write("**Setup**: Price oversold. Directional skew suggested.")
-    elif signal == -1:
-        st.warning("🔴 PUT SPREAD CANDIDATE (Skewed)")
-        st.write("**Setup**: Price overbought. Directional skew suggested.")
-    else:
-        st.info("⚪ NO CLEAR SETUP")
-        st.write("**Wait for**: Range-bound consolidation and stable volatility.")
-    
-    st.markdown("### Conditions Matrix:")
-    for reason in reasons:
-        st.write(reason)
-
-with col_levels:
-    if signal != 0 and ic_levels:
-        st.subheader("📍 Suggested Strike Levels")
-        
-        level_data = {
-            "Strike Type": ["Short Call", "Long Call", "Short Put", "Long Put"],
-            "Price": [
-                f"${ic_levels.get('short_call'):.2f}",
-                f"${ic_levels.get('long_call'):.2f}",
-                f"${ic_levels.get('short_put'):.2f}",
-                f"${ic_levels.get('long_put'):.2f}"
-            ]
-        }
-        level_df = pd.DataFrame(level_data)
-        st.dataframe(level_df, use_container_width=True, hide_index=True)
-        
-        st.write(f"**Max Profit Width (Wings)**: ${ic_levels['wing_width']:.2f}")
-        st.write(f"**Collateral Required**: ${ic_levels['wing_width'] * 100:.2f} per contract")
-        st.write(f"**Max Profit Region**: ${ic_levels['max_profit_range_low']:.2f} to ${ic_levels['max_profit_range_high']:.2f}")
-
-st.divider()
+col1.metric("Close Price", f"${latest['close']:.2f}")
+col2.metric("RSI (Daily)", f"{latest['rsi']:.1f}")
+col3.metric("ATR (Daily)", f"${latest['atr']:.2f}")
+col4.metric("IV Rank", f"{latest['iv_rank']:.1%}")
 
 # ---------------------------------------------------------
-# Technical Chart
+# Charting
 # ---------------------------------------------------------
-st.subheader("📈 SPY Price & Technical Indicators")
+st.subheader(f"📊 {ticker} Daily Price Action & Bollinger Bands")
 
+plot_df = proc_df.tail(90)
 fig = go.Figure()
 
-# Candlestick-style price chart
-fig.add_trace(go.Scatter(
-    x=df.index,
-    y=df['close'],
-    mode='lines',
-    name='SPY Close',
-    line=dict(color='#1f77b4', width=2),
-    hovertemplate='<b>%{x|%Y-%m-%d}</b><br>Close: $%{y:.2f}<extra></extra>'
-))
+fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df["open"], high=plot_df["high"], low=plot_df["low"], close=plot_df["close"], name="Price"))
 
-# Bollinger Bands
-bb_upper_col = [c for c in df.columns if 'BBU' in c][0] if any('BBU' in c for c in df.columns) else None
-bb_lower_col = [c for c in df.columns if 'BBL' in c][0] if any('BBL' in c for c in df.columns) else None
+bbu_col = [c for c in plot_df.columns if 'BBU' in c][0]
+bbl_col = [c for c in plot_df.columns if 'BBL' in c][0]
 
-if bb_upper_col:
-    fig.add_trace(go.Scatter(
-        x=df.index,
-        y=df[bb_upper_col],
-        mode='lines',
-        name='BB Upper',
-        line=dict(color='rgba(255, 100, 100, 0.3)'),
-        hoverinfo='skip'
-    ))
+fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[bbu_col], line=dict(color="rgba(255, 255, 255, 0.2)", width=1, dash="dot"), name="Upper BB"))
+fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df[bbl_col], line=dict(color="rgba(255, 255, 255, 0.2)", width=1, dash="dot"), name="Lower BB", fill="tonexty", fillcolor="rgba(255, 255, 255, 0.05)"))
 
-if bb_lower_col:
-    fig.add_trace(go.Scatter(
-        x=df.index,
-        y=df[bb_lower_col],
-        mode='lines',
-        name='BB Lower',
-        line=dict(color='rgba(100, 100, 255, 0.3)'),
-        fill='tonexty',
-        fillcolor='rgba(150, 150, 200, 0.1)',
-        hoverinfo='skip'
-    ))
+if latest["signal"] == 2:
+    fig.add_hline(y=short_c, line_dash="solid", line_color="#ff5252", annotation_text=f"Short Call (${short_c:.0f})")
+    fig.add_hline(y=short_p, line_dash="solid", line_color="#00e676", annotation_text=f"Short Put (${short_p:.0f})")
 
-# SMA Lines
-fig.add_trace(go.Scatter(
-    x=df.index,
-    y=df['SMA_14'],
-    mode='lines',
-    name='SMA 14',
-    line=dict(color='#ff7f0e', width=1, dash='dash'),
-    hoverinfo='skip'
-))
-
-fig.add_trace(go.Scatter(
-    x=df.index,
-    y=df['SMA_50'],
-    mode='lines',
-    name='SMA 50',
-    line=dict(color='#2ca02c', width=1, dash='dash'),
-    hoverinfo='skip'
-))
-
-fig.update_layout(
-    height=400,
-    template='plotly_dark',
-    xaxis_title='Date',
-    yaxis_title='Price ($)',
-    hovermode='x unified',
-    margin=dict(l=10, r=10, t=40, b=10)
-)
-
+fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=30, b=20))
 st.plotly_chart(fig, use_container_width=True)
-
-# ---------------------------------------------------------
-# RSI Chart
-# ---------------------------------------------------------
-col_rsi, col_vol = st.columns(2)
-
-with col_rsi:
-    st.subheader("RSI (14)")
-    fig_rsi = go.Figure()
-    
-    fig_rsi.add_trace(go.Scatter(
-        x=df.index,
-        y=df['RSI'],
-        mode='lines',
-        name='RSI',
-        line=dict(color='#9467bd', width=2),
-    ))
-    
-    # Add Neutral Zone shading
-    fig_rsi.add_hrect(
-        y0=40, y1=60, 
-        line_width=0, 
-        fillcolor="rgba(0, 255, 0, 0.15)", 
-        annotation_text="Neutral Strategy Zone", 
-        annotation_position="top left"
-    )
-    
-    # Add overbought/oversold lines
-    fig_rsi.add_hline(y=70, line_dash="dash", line_color="red", annotation_text="Overbought")
-    fig_rsi.add_hline(y=30, line_dash="dash", line_color="red", annotation_text="Oversold")
-    fig_rsi.add_hline(y=50, line_dash="dot", line_color="gray")
-    
-    fig_rsi.update_layout(
-        height=300,
-        template='plotly_dark',
-        xaxis_title='Date',
-        yaxis_title='RSI',
-        hovermode='x',
-        margin=dict(l=10, r=10, t=40, b=10)
-    )
-    
-    st.plotly_chart(fig_rsi, use_container_width=True)
-
-with col_vol:
-    st.subheader("Volatility Trend (IV Rank Proxy)")
-    fig_vol = go.Figure()
-    
-    # Normalize volatility for display purposes to match the IV Rank math
-    vol_min = df['Volatility'].min()
-    vol_max = df['Volatility'].max()
-    historical_iv_rank = (df['Volatility'] - vol_min) / (vol_max - vol_min) * 100
-    
-    fig_vol.add_trace(go.Scatter(
-        x=df.index,
-        y=historical_iv_rank,
-        mode='lines',
-        name='IV Rank (%)',
-        line=dict(color='#d62728', width=2),
-        fill='tozeroy',
-        fillcolor='rgba(214, 39, 40, 0.3)'
-    ))
-    
-    # Add the 20% floor line
-    fig_vol.add_hline(y=20, line_dash="dash", line_color="green", annotation_text="Minimum Premium Floor (20%)")
-    
-    fig_vol.update_layout(
-        height=300,
-        template='plotly_dark',
-        xaxis_title='Date',
-        yaxis_title='IV Rank (%)',
-        hovermode='x',
-        margin=dict(l=10, r=10, t=40, b=10)
-    )
-    
-    st.plotly_chart(fig_vol, use_container_width=True)
-
-st.divider()
-
-# ---------------------------------------------------------
-# Configuration Info
-# ---------------------------------------------------------
-with st.expander("⚙️ Configuration & Strategy"):
-    st.write("""
-    ### True Neutral Iron Condor Strategy
-    
-    **When to Trade:**
-    - **Range-Bound Action:** Price must be hovering near the 20-day Bollinger Band midline, signifying the absence of a strong trend.
-    - **Neutral Momentum:** RSI must sit squarely in the 40-60 zone. Extreme momentum (>70 or <30) suggests entering a skewed, directional spread instead.
-    - **Elevated Volatility (IV Rank > 20%):** Iron Condors are short-premium strategies. Volatility must be elevated to ensure the collateral-to-premium ratio is worth the risk.
-    - **Stable Volatility (ATR Check):** While elevated, the volatility should be stable (ATR within 20% of its 10-day average), avoiding erratic blowout moves.
-    
-    **Strike Selection:**
-    - **Short strikes:** Placed symmetrically at ~2.0x ATR from the current price (targeting ~16 Delta / 1 Standard Deviation).
-    - **Long wings:** Placed $2.00 further out to cap maximum loss and define buying power reduction.
-    
-    **Risk Management:**
-    - Enter around 30-45 DTE (Days to Expiration).
-    - Exit strategy: Close at 50% max profit.
-    - Stop loss: Typically if the underlying breaches the short strike of either wing.
-    """)
-    
-    st.json(IC_SETUP)
