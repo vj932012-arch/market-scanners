@@ -1,6 +1,6 @@
 """
 Iron Condor Bot with Telegram Alerts (Polygon.io Integration)
-Monitors SPY for ideal setups and sends alerts via Telegram
+Monitors SPY for 7-DTE swing setups and sends alerts via Telegram
 """
 
 import os
@@ -22,6 +22,7 @@ PERIOD_SHORT = 14
 PERIOD_LONG = 50
 
 # Strike & Delta Configuration
+DTE = 7                     # Target Days to Expiration
 DELTA_ATR_MULTIPLIER = 2.0  # Target Delta: ~16 Delta / 1 SD
 WING_WIDTH = 2.0            # Defined-risk spread width in dollars
 
@@ -82,7 +83,8 @@ def fetch_polygon_data(ticker_symbol: str, days: int = LOOKBACK_DAYS) -> pd.Data
     end_date = datetime.now().date()
     start_date = end_date - timedelta(days=days)
 
-    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_symbol}/range/15/minute/{start_date}/{end_date}"
+    # 1/day endpoint ensures proper daily indicators for a 7-DTE swing
+    url = f"https://api.polygon.io/v2/aggs/ticker/{ticker_symbol}/range/1/day/{start_date}/{end_date}"
     params = {
         "adjusted": "true",
         "sort": "asc",
@@ -116,7 +118,7 @@ def fetch_polygon_data(ticker_symbol: str, days: int = LOOKBACK_DAYS) -> pd.Data
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df.set_index("timestamp", inplace=True)
     df.index = df.index.tz_convert("America/New_York")
-    
+
     return df
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -224,8 +226,11 @@ def identify_ic_setup(df: pd.DataFrame) -> Tuple[int, float, Dict]:
     return signal, score, details
 
 def calculate_ic_levels(close_price: float, atr: float, signal: int = 0) -> Dict:
-    """Calculate tradeable, rounded Iron Condor strike levels."""
-    short_distance = atr * DELTA_ATR_MULTIPLIER
+    """Calculate tradeable, rounded Iron Condor strike levels for 7 DTE."""
+    
+    # Scale 1-day ATR to a 7 calendar-day (5 trading day) expected move
+    expected_7_day_move = atr * np.sqrt(5)
+    short_distance = expected_7_day_move * DELTA_ATR_MULTIPLIER
 
     # Asymmetric skewing based on trend signal
     if signal == 1:
@@ -256,8 +261,10 @@ def calculate_ic_levels(close_price: float, atr: float, signal: int = 0) -> Dict
 
 def format_alert_message(signal: int, score: float, details: Dict, levels: Dict) -> str:
     """Format active alert message for Telegram"""
-    now_et = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S ET')
-    
+    now_et = datetime.now(pytz.timezone('US/Eastern'))
+    target_exp = (now_et + timedelta(days=DTE)).strftime('%b %d, %Y')
+    timestamp_str = now_et.strftime('%Y-%m-%d %H:%M:%S ET')
+
     if signal == 2:
         signal_type = "🦅 NEUTRAL IRON CONDOR"
     elif signal == 1:
@@ -270,8 +277,9 @@ def format_alert_message(signal: int, score: float, details: Dict, levels: Dict)
     message = f"""<b>{signal_type} SIGNAL - Setup Score: {score:.0f}/100</b>
 
 <b>Current Price:</b> ${details['price']:.2f}
-<b>RSI:</b> {details['rsi']:.1f}
-<b>ATR:</b> ${details['atr']:.2f}
+<b>Target Expiration:</b> {target_exp} (7 DTE)
+<b>RSI (Daily):</b> {details['rsi']:.1f}
+<b>ATR (Daily):</b> ${details['atr']:.2f}
 <b>IV Rank:</b> {details['iv_rank']:.1%}
 
 <b>Setup Conditions:</b>"""
@@ -282,20 +290,20 @@ def format_alert_message(signal: int, score: float, details: Dict, levels: Dict)
     if levels:
         message += f"""
 
-<b>Suggested Strikes (16 Delta, ${levels['wing_width']}-Wide Wings):</b>
+<b>Suggested Strikes (~16 Delta, ${levels['wing_width']}-Wide Wings):</b>
 Short Call: ${levels['short_call']:.2f} / Long Call: ${levels['long_call']:.2f}
 Short Put: ${levels['short_put']:.2f} / Long Put: ${levels['long_put']:.2f}
 
 <b>Max Profit Zone:</b> ${levels['max_profit_range_low']:.2f} - ${levels['max_profit_range_high']:.2f}
 <b>Defined Collateral:</b> ${levels['wing_width'] * 100:.2f}"""
 
-    message += f"\n\n<b>Timestamp:</b> {now_et}"
+    message += f"\n\n<b>Timestamp:</b> {timestamp_str}"
     return message
 
 def format_heartbeat_message(score: float, details: Dict) -> str:
     """Format heartbeat status message when no actionable setup is detected"""
     now_et = datetime.now(pytz.timezone('US/Eastern')).strftime('%Y-%m-%d %H:%M:%S ET')
-    
+
     rsi_val = details.get('rsi')
     rsi_str = f"{rsi_val:.1f}" if rsi_val is not None and not np.isnan(rsi_val) else "N/A"
 
@@ -305,8 +313,8 @@ def format_heartbeat_message(score: float, details: Dict) -> str:
 <b>Score:</b> {score:.0f}/100 (Threshold: {IC_SETUP['min_score']:.0f})
 
 <b>Current Price:</b> ${details['price']:.2f}
-<b>RSI:</b> {rsi_str}
-<b>ATR:</b> ${details['atr']:.2f}
+<b>RSI (Daily):</b> {rsi_str}
+<b>ATR (Daily):</b> ${details['atr']:.2f}
 <b>IV Rank:</b> {details['iv_rank']:.1%}
 
 <b>Conditions Observed:</b>"""
