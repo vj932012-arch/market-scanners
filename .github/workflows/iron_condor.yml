@@ -1,28 +1,28 @@
-name: Iron Condor Scanner Bot
+name: 7-DTE Iron Condor Swing Bot
 
 on:
-  # Allow manual runs from the GitHub Actions tab
-  workflow_dispatch:
+ 
+  workflow_dispatch: # Allows manual trigger testing
 
 jobs:
-  run-bot:
+  scan-iron-condor:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
+          # Pinned to 3.12 to prevent pandas-ta dependency crashes
           python-version: '3.12'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas numpy pandas-ta pytz
+          pip install -r requirements.txt
 
-      - name: Run Iron Condor Bot
+      - name: Run Iron Condor Analysis
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
