@@ -54,7 +54,7 @@ def generate_ic_signals(df: pd.DataFrame, vol_min: float, vol_max: float) -> pd.
             score += 30
         if pd.notna(df["rsi"].iloc[i]) and 40 <= df["rsi"].iloc[i] <= 60:
             score += 25
-            
+
         bbu_col = [c for c in df.columns if 'BBU' in c]
         bbl_col = [c for c in df.columns if 'BBL' in c]
         if bbu_col and bbl_col and pd.notna(df[bbu_col[0]].iloc[i]):
@@ -62,12 +62,12 @@ def generate_ic_signals(df: pd.DataFrame, vol_min: float, vol_max: float) -> pd.
             bb_range = df[bbu_col[0]].iloc[i] - df[bbl_col[0]].iloc[i]
             if bb_range > 0 and abs(df["close"].iloc[i] - bb_mid) < (bb_range * 0.25):
                 score += 25
-                
+
         if i >= 10:
             atr_sma = df["atr"].iloc[i-10:i].mean()
             if atr_sma > 0 and 0.8 <= (df["atr"].iloc[i] / atr_sma) <= 1.2:
                 score += 20
-                
+
         df.iloc[i, df.columns.get_loc("score")] = score
         if score >= 70: df.iloc[i, df.columns.get_loc("signal")] = 2
 
@@ -80,10 +80,10 @@ def calculate_7_dte_strikes(price: float, atr: float, delta_multiplier: float, w
 
     short_call = np.ceil(price + short_distance)
     short_put = np.floor(price - short_distance)
-    
+
     long_call = short_call + wing_width
     long_put = short_put - wing_width
-    
+
     return short_call, long_call, short_put, long_put
 
 # ---------------------------------------------------------
@@ -94,12 +94,17 @@ st.caption("Scans daily market data for neutral setups to harvest accelerating s
 
 st.sidebar.header("⚙️ Strategy Parameters")
 ticker = st.sidebar.text_input("Ticker Symbol", "SPY").upper()
-# Multiplier lowered from 1.5 to 1.0 to generate strikes closer to the money
 delta_mult = st.sidebar.slider("Delta (ATR) Multiplier", 0.5, 2.5, 1.0, step=0.1)
-# Wing width default increased to $5.00 for higher credit potential
 wing_width = st.sidebar.selectbox("Wing Width ($)", [1.0, 2.0, 3.0, 5.0, 10.0], index=1)
 vol_min = st.sidebar.slider("Min IV Rank", 0.0, 0.5, 0.20, step=0.05)
 vol_max = st.sidebar.slider("Max IV Rank", 0.5, 1.0, 0.85, step=0.05)
+
+st.sidebar.markdown("---")
+
+# Manual cache bust button to force live chart reload
+if st.sidebar.button("🔄 Force Refresh Data"):
+    st.cache_data.clear()
+    st.rerun()
 
 raw_df = fetch_daily_data(ticker)
 if raw_df.empty:
@@ -113,10 +118,10 @@ target_exp = (datetime.datetime.now() + datetime.timedelta(days=7)).strftime('%b
 if latest["signal"] == 2:
     st.markdown(f'<div class="banner-green">🦅 {ticker} @ ${latest["close"]:.2f} — NEUTRAL SETUP TRIGGERED (Score: {latest["score"]:.0f}/100)</div>', unsafe_allow_html=True)
     short_c, long_c, short_p, long_p = calculate_7_dte_strikes(latest["close"], latest["atr"], delta_mult, wing_width)
-    
+
     st.markdown(f"### 📋 {ticker} Suggested 7-DTE Structure")
     st.markdown(f"**Target Expiration:** {target_exp}")
-    
+
     c1, c2, c3 = st.columns(3)
     c1.info(f"**Call Side:**\nSell ${short_c:.0f}C / Buy ${long_c:.0f}C")
     c2.info(f"**Put Side:**\nSell ${short_p:.0f}P / Buy ${long_p:.0f}P")
@@ -146,4 +151,4 @@ if latest["signal"] == 2:
     fig.add_hline(y=short_p, line_dash="solid", line_color="#00e676", annotation_text=f"Short Put (${short_p:.0f})")
 
 fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=20, r=20, t=30, b=20))
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True, key=f"chart_{ticker}")
