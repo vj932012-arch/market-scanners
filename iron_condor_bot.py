@@ -19,7 +19,7 @@ IC_SETUP = {
     'rsi_buy_threshold': 35,
     'min_score': 70.0,
     'delta_atr_multiplier': 1.0, # Lowered from 1.5/2.0 to capture ~20 delta premium
-    'wing_width': 5.0            # Expanded to $5 to improve credit ratios
+    'wing_width': 2.0            # Expanded to $5 to improve credit ratios
 }
 
 def fetch_spy_data_polygon(ticker: str = TICKER, days: int = LOOKBACK_DAYS) -> pd.DataFrame:
