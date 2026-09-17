@@ -97,7 +97,7 @@ ticker = st.sidebar.text_input("Ticker Symbol", "SPY").upper()
 # Multiplier lowered from 1.5 to 1.0 to generate strikes closer to the money
 delta_mult = st.sidebar.slider("Delta (ATR) Multiplier", 0.5, 2.5, 1.0, step=0.1)
 # Wing width default increased to $5.00 for higher credit potential
-wing_width = st.sidebar.selectbox("Wing Width ($)", [1.0, 2.0, 3.0, 5.0, 10.0], index=3)
+wing_width = st.sidebar.selectbox("Wing Width ($)", [1.0, 2.0, 3.0, 5.0, 10.0], index=0)
 vol_min = st.sidebar.slider("Min IV Rank", 0.0, 0.5, 0.20, step=0.05)
 vol_max = st.sidebar.slider("Max IV Rank", 0.5, 1.0, 0.85, step=0.05)
 
