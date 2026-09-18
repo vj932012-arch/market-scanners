@@ -95,7 +95,7 @@ def evaluate_intraday_setup(ticker: str):
     """Calculates EMAs, VWAP displacement, RVOL, and ADX/DMI for momentum entries."""
     df = fetch_polygon_intraday(ticker)
     if df.empty or len(df) < 28:
-        return None
+        return None, None
 
     # 1. ATR (14) for dynamic normalization
     tr1 = df["high"] - df["low"]
@@ -122,71 +122,91 @@ def evaluate_intraday_setup(ticker: str):
         df["ADX_14"], df["DMP_14"], df["DMN_14"] = 0.0, 0.0, 0.0
 
     latest = df.iloc[-1]
+    prev = df.iloc[-2]
     price = latest["close"]
+    
+    # Apply Lookback Smoothing for RVOL
+    smoothed_rvol = max(latest["rvol"], prev["rvol"])
 
-    # Pull dynamic parameters from config
-    spread_width = config["spread_width"]
-    rvol_thresh = config["rvol_threshold"]
-    adx_thresh = config["adx_threshold"]
+    # Pull dynamic parameters from config, with realistic intraday fallbacks
+    spread_width = config.get("spread_width", 2.0)
+    rvol_thresh = config.get("rvol_threshold", 1.20)
+    adx_thresh = config.get("adx_threshold", 22.0)
 
-    # Call Logic
+    # Generate Telemetry Heartbeat Data
+    telemetry = f"• **{ticker}:** ${price:.2f} | ADX: {latest.get('ADX_14', 0):.1f} | RVOL: {smoothed_rvol:.2f}x | VWAP Dist: {latest['vwap_dist_norm']:.2f}σ"
+
+    # Call Logic (Scaled EMA spread threshold to 0.10)
     call_spread = (
-        latest["ema_spread_norm"] > 0.15 and
+        latest["ema_spread_norm"] > 0.10 and
         0.20 <= latest["vwap_dist_norm"] <= 1.10 and
-        latest["rvol"] >= rvol_thresh and
+        smoothed_rvol >= rvol_thresh and
         latest["close"] > latest["open"] and
         latest.get("ADX_14", 0) >= adx_thresh and
         latest.get("DMP_14", 0) > latest.get("DMN_14", 0)
     )
 
-    # Put Logic
+    # Put Logic (Scaled EMA spread threshold to -0.10)
     put_spread = (
-        latest["ema_spread_norm"] < -0.15 and
+        latest["ema_spread_norm"] < -0.10 and
         -1.10 <= latest["vwap_dist_norm"] <= -0.20 and
-        latest["rvol"] >= rvol_thresh and
+        smoothed_rvol >= rvol_thresh and
         latest["close"] < latest["open"] and
         latest.get("ADX_14", 0) >= adx_thresh and
         latest.get("DMN_14", 0) > latest.get("DMP_14", 0)
     )
+    
     if call_spread:
         long_strike = np.floor(price)
         short_strike = long_strike + spread_width
-        return (
+        signal = (
             f"🟢 **{ticker} 0DTE CALL SPREAD**\n"
             f"Price: ${price:.2f} | Strong Bullish Momentum\n"
-            f"• RVOL: {latest['rvol']:.2f}x | ADX: {latest.get('ADX_14', 0):.1f}\n"
+            f"• RVOL: {smoothed_rvol:.2f}x | ADX: {latest.get('ADX_14', 0):.1f}\n"
             f"• Strikes: Buy ${long_strike:.0f}C / Sell ${short_strike:.0f}C"
         )
+        return signal, telemetry
+        
     elif put_spread:
         long_strike = np.ceil(price)
         short_strike = long_strike - spread_width
-        return (
+        signal = (
             f"🔴 **{ticker} 0DTE PUT SPREAD**\n"
             f"Price: ${price:.2f} | Strong Bearish Momentum\n"
-            f"• RVOL: {latest['rvol']:.2f}x | ADX: {latest.get('ADX_14', 0):.1f}\n"
+            f"• RVOL: {smoothed_rvol:.2f}x | ADX: {latest.get('ADX_14', 0):.1f}\n"
             f"• Strikes: Buy ${long_strike:.0f}P / Sell ${short_strike:.0f}P"
         )
+        return signal, telemetry
 
-    return None
+    return None, telemetry
 
 def run_intraday_scan():
     print("Running 0DTE Intraday Scan via Polygon.io...")
-    
+
     # Fix the UTC time bug so it prints actual Eastern Time
     now_et = datetime.datetime.now(pytz.timezone('US/Eastern')).strftime('%H:%M ET')
     messages = [f"⚡ **0DTE Intraday Scanner** ({now_et})\n"]
+    
     triggers = 0
+    telemetry_logs = []
 
     for ticker in TICKERS:
-        signal = evaluate_intraday_setup(ticker)
+        signal, telemetry = evaluate_intraday_setup(ticker)
+        
         if signal:
             messages.append(signal)
             triggers += 1
+            
+        if telemetry:
+            telemetry_logs.append(telemetry)
+            
         time.sleep(1)  # Buffer between API requests
 
-    # Remove the silent gate and append a heartbeat message if no trades triggered
+    # Append informative telemetry if no trades triggered
     if triggers == 0:
-        messages.append("⚪ No active 0DTE breakout signals right now.")
+        messages.append("⚪ **No active 0DTE breakout signals right now.**\n")
+        messages.append("*Live Telemetry:*")
+        messages.extend(telemetry_logs)
 
     final_message = "\n\n".join(messages)
     print(final_message)
