@@ -1,18 +1,11 @@
 name: Intraday 0DTE Spread Scanner
 
 on:
-  workflow_dispatch: # Keep this! The external API needs it to run.
-
-
-
+  workflow_dispatch: # Keeps the workflow active for external API triggers from cron-job.org
 
 jobs:
   scan-intraday:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    concurrency:
-      group: intraday-scan
-      cancel-in-progress: true
 
     steps:
       - name: Checkout repository
@@ -21,47 +14,18 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          # Pinned to 3.12 to prevent pandas-ta dependency crashes
+          # Pin to 3.12 to prevent the pandas-ta install crash
           python-version: '3.12'
-
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Validate secrets
-        run: |
-          [[ -n "$TELEGRAM_BOT_TOKEN" ]] || (echo "❌ TELEGRAM_BOT_TOKEN not set" && exit 1)
-          [[ -n "$TELEGRAM_CHAT_ID" ]] || (echo "❌ TELEGRAM_CHAT_ID not set" && exit 1)
-          [[ -n "$POLYGON_API_KEY" ]] || (echo "❌ POLYGON_API_KEY not set" && exit 1)
-          echo "✅ All secrets validated"
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-
       - name: Run Intraday Bot
         env:
+          # Pulls your existing credentials securely
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: python intraday_0dte_bot.py
-
-      - name: Notify on failure
-        if: failure()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${TELEGRAM_CHAT_ID}" \
-            -d "text=❌ Intraday 0DTE bot failed on ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            -d "parse_mode=HTML"
