@@ -10,7 +10,7 @@ import pytz
 # --- CONFIGURATION ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-TICKERS = ["QQQ", "MSFT"]
+TICKERS = ["SPY", "QQQ", "MSFT"]
 
 # Strategy Parameters
 VOL_MIN = 0.20
